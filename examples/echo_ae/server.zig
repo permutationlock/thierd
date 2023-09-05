@@ -2,9 +2,11 @@ const std = @import("std");
 const thierd = @import("thierd");
 const log = std.log.scoped(.echo_server);
 
-const Protocol = thierd.CodedProtocol(&[_]u8{0xf, 0x0, 0x0, 0xd});
+const Protocol = thierd.AEProtocol;
+const Result = Protocol.Result;
 const EchoServer = thierd.Server(Protocol, Message, 256);
 const Handle = EchoServer.Handle;
+const KeyPair = std.crypto.sign.Ed25519.KeyPair;
 
 const Message = struct {
     len: u32,
@@ -16,7 +18,7 @@ const Message = struct {
     }
 };
 
-fn handleOpen(_: *EchoServer, handle: Handle, _: void) void {
+fn handleOpen(_: *EchoServer, handle: Handle, _: Result) void {
     log.info("connection {} opened", .{ handle });
 }
 
@@ -35,7 +37,8 @@ pub fn main() !void {
     var server = EchoServer.new();
     std.debug.print("size of connection: {}b\n", .{@sizeOf(thierd.Connection(Protocol, Message))});
     std.debug.print("size of server: {}b\n", .{@sizeOf(EchoServer)});
-    try server.listen(8081, 32, {});
+    const key_pair = try KeyPair.create(null);
+    try server.listen(8081, 32, &key_pair);
     errdefer { server.halt(); server.deinit(); }
 
     while (true) {

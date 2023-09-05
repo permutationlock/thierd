@@ -2,9 +2,11 @@ const std = @import("std");
 const thierd = @import("thierd");
 const log = std.log.scoped(.echo_client);
 
-const Protocol = thierd.CodedProtocol(&[_]u8{0xf, 0x0, 0x0, 0xd});
+const Protocol = thierd.AEProtocol;
 const Client = thierd.Server(Protocol, Message, 32);
 const Handle = Client.Handle;
+const Result = Protocol.Result;
+const KeyPair = std.crypto.sign.Ed25519.KeyPair;
 
 const Message = extern struct {
     len: u32,
@@ -24,7 +26,7 @@ const EchoClient = struct {
     client: Client,
     handle: ?Handle,
 
-    fn handleOpen(self: *EchoClient, handle: Handle, _: void) void {
+    fn handleOpen(self: *EchoClient, handle: Handle, _: Result) void {
         log.info("connection {} opened", .{ handle });
         self.handle = handle;
     }
@@ -38,8 +40,10 @@ const EchoClient = struct {
         log.info("server {} sent: {s}", .{ handle, msg.asSlice() });
     }
 
-    fn connect(self: *EchoClient, ip: []const u8, port: u16) !void {
-        return self.client.connect(ip, port, {});
+    fn connect(
+        self: *EchoClient, ip: []const u8, port: u16, key_pair: *const KeyPair
+    ) !void {
+        return self.client.connect(ip, port, key_pair);
     }
 
     fn send(self: *EchoClient, msg: Message) !void {
@@ -58,7 +62,8 @@ const EchoClient = struct {
 
 pub fn main() !void {
     var client = EchoClient{ .client = Client.new(), .handle = null };
-    try client.connect("127.0.0.1", 8081);
+    const key_pair = try KeyPair.create(null);
+    try client.connect("127.0.0.1", 8081, &key_pair);
 
     var msg: Message = undefined;
     const str = "Hello from the client!";

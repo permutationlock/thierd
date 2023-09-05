@@ -1,6 +1,11 @@
 const std = @import("std");
 const Builder = std.build.Builder;
 
+const Example = struct {
+    name: []const u8,
+    path: []const u8,
+};
+
 pub fn build(b: *Builder) void {
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
@@ -16,21 +21,21 @@ pub fn build(b: *Builder) void {
         .source_file = .{ .path = "thierd.zig" },
     });
 
-    const server = b.addExecutable(.{
-        .name = "echo_server",
-        .root_source_file = .{ .path = "examples/echo/server.zig" },
-        .target = target,
-        .optimize = optimize
-    });
-    server.addModule("thierd", thierd);
-    b.installArtifact(server);
+    const examples = [_]Example{
+        .{ .name = "echo_server", .path = "examples/echo/server.zig" },
+        .{ .name = "echo_client", .path = "examples/echo/client.zig" },
+        .{ .name = "echo_ae_server", .path = "examples/echo_ae/server.zig" },
+        .{ .name = "echo_ae_client", .path = "examples/echo_ae/client.zig" },
+    };
 
-    const client = b.addExecutable(.{
-        .name = "echo_client",
-        .root_source_file = .{ .path = "examples/echo/client.zig" },
-        .target = target,
-        .optimize = optimize
-    });
-    client.addModule("thierd", thierd);
-    b.installArtifact(client);
+    for (examples) |example| {
+        const exe = b.addExecutable(.{
+            .name = example.name,
+            .root_source_file = .{ .path = example.path },
+            .target = target,
+            .optimize = optimize
+        });
+        exe.addModule("thierd", thierd);
+        b.installArtifact(exe);
+    }
 }
