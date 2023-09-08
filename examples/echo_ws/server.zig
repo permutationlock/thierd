@@ -2,22 +2,18 @@ const std = @import("std");
 const thierd = @import("thierd");
 const log = std.log.scoped(.echo_server);
 
-const Protocol = thierd.AEProtocol;
+const Protocol = thierd.WebsocketProtocol;
 const EchoServer = thierd.Server(Protocol, Message, 256, 32);
-const Result = EchoServer.Result;
 const Handle = EchoServer.Handle;
-const KeyPair = std.crypto.sign.Ed25519.KeyPair;
 const Message = struct {
-    len: u32,
-    bytes: [384]u8,
-    placholder: u8 = 0x77,
+    bytes: [128]u8,
 
     fn asSlice(msg: *const Message) []const u8 {
-        return msg.bytes[0..@min(msg.len, 64)];
+        return &msg.bytes;
     }
 };
 
-fn handleOpen(_: *EchoServer, handle: Handle, _: Result) void {
+fn handleOpen(_: *EchoServer, handle: Handle, _: void) void {
     log.info("connection {} opened", .{ handle });
 }
 
@@ -34,13 +30,12 @@ fn handleMessage(server: *EchoServer, handle: Handle, msg: Message) void {
 
 pub fn main() !void {
     var server = EchoServer.new();
-    const key_pair = try KeyPair.create(null);
-    try server.listen(8081, 32, &key_pair);
+    try server.listen(8081, 32, {});
     errdefer { server.halt(); server.deinit(); }
 
     while (true) {
         try server.poll(
-            &server, handleOpen, handleMessage, handleClose, 32, 1000, 1000
+            &server, handleOpen, handleMessage, handleClose, 32, 1000, 10000000
         );
     }
 }

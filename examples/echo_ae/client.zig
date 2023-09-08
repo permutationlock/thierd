@@ -3,22 +3,17 @@ const thierd = @import("thierd");
 const log = std.log.scoped(.echo_client);
 
 const Protocol = thierd.AEProtocol;
-const Client = thierd.Server(Protocol, Message, 32);
+const Client = thierd.Server(Protocol, Message, 1, 1);
 const Handle = Client.Handle;
-const Result = Protocol.Result;
+const Result = Client.Result;
 const KeyPair = std.crypto.sign.Ed25519.KeyPair;
-
-const Message = extern struct {
+const Message = struct {
     len: u32,
-    bytes: [64]u8,
+    bytes: [384]u8,
     placholder: u8 = 0x77,
 
-    fn asMutSlice(msg: *Message) []u8 {
-        return msg.bytes[0..msg.len];
-    }
-
     fn asSlice(msg: *const Message) []const u8 {
-        return msg.bytes[0..msg.len];
+        return msg.bytes[0..@min(msg.len, 64)];
     }
 };
 
@@ -36,8 +31,8 @@ const EchoClient = struct {
         self.handle = null;
     }
 
-    fn handleMessage(_: *EchoClient, handle: Handle, msg: *Message) void {
-        log.info("server {} sent: {s}", .{ handle, msg.asSlice() });
+    fn handleMessage(_: *EchoClient, handle: Handle, msg: Message) void {
+        log.info("connection {} sent: {s}", .{ handle, msg.asSlice() });
     }
 
     fn connect(
@@ -55,7 +50,7 @@ const EchoClient = struct {
 
     fn poll(self: *EchoClient, wait_ms: i32) !void {
         return self.client.poll(
-            self, handleOpen, handleMessage, handleClose, 6, wait_ms
+            self, handleOpen, handleMessage, handleClose, 6, wait_ms, 1000
         );
     }
 };
@@ -65,8 +60,11 @@ pub fn main() !void {
     const key_pair = try KeyPair.create(null);
     try client.connect("127.0.0.1", 8081, &key_pair);
 
-    var msg: Message = undefined;
     const str = "Hello from the client!";
+    var msg: Message = .{
+        .len = 0,
+        .bytes = undefined,
+    };
     @memcpy(msg.bytes[0..str.len], "Hello from the client!");
     msg.len = str.len;
     var last = std.time.Instant.now() catch unreachable;

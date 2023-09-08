@@ -11,6 +11,19 @@ pub fn RingArray(comptime T: type, comptime size: comptime_int) type {
         back: usize = 0,
         items: [size]T = undefined,
 
+        pub const Iterator = struct {
+            ra: *Self,
+            index: usize = 0,
+
+            pub fn next(it: *Iterator) ?*T {
+                if (it.index >= it.ra.len) {
+                    return null;
+                }
+                it.index += 1;
+                return &it.ra.items[(it.ra.front + it.index - 1) % size];
+            }
+        };
+
         pub fn init(self: *Self) void {
             self.front = 0;
             self.back = 0;
@@ -94,6 +107,10 @@ pub fn RingArray(comptime T: type, comptime size: comptime_int) type {
 
         pub fn get_items(self: *Self) *[size]T {
             return &self.items;
+        }
+
+        pub fn iterator(self: *Self) Iterator {
+            return .{ .ra = self };
         }
     };
 }
