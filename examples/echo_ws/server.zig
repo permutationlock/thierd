@@ -2,7 +2,9 @@ const std = @import("std");
 const thierd = @import("thierd");
 const log = std.log.scoped(.echo_server);
 
-const Protocol = thierd.WebsocketProtocol;
+const Protocol = thierd.Websockify(thierd.CodedProtocol);
+//const Protocol = thierd.WebsocketProtocol;
+const Result = EchoServer.Result;
 const EchoServer = thierd.Server(Protocol, Message, 256, 32);
 const Handle = EchoServer.Handle;
 const Message = struct {
@@ -13,7 +15,7 @@ const Message = struct {
     }
 };
 
-fn handleOpen(_: *EchoServer, handle: Handle, _: void) void {
+fn handleOpen(_: *EchoServer, handle: Handle, _: Result) void {
     log.info("connection {} opened", .{ handle });
 }
 
@@ -29,8 +31,9 @@ fn handleMessage(server: *EchoServer, handle: Handle, msg: Message) void {
 }
 
 pub fn main() !void {
+    const code = [_]u8{0xf, 0x0, 0x0, 0xd, 0xb, 0xe, 0xe, 0xf} ** 2;
     var server = EchoServer.new();
-    try server.listen(8081, 32, {});
+    try server.listen(8081, 32, &code);
     errdefer { server.halt(); server.deinit(); }
 
     while (true) {

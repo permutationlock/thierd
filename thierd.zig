@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const testing = std.testing;
 const expectEqual = testing.expectEqual;
@@ -13,6 +14,7 @@ const IPPROTO = os.IPPROTO;
 const TCP = os.TCP;
 const SO = os.SO;
 const SOL = os.SOL;
+const POLL = os.POLL;
 const EPOLL = os.linux.EPOLL;
 
 const mem = std.mem;
@@ -89,10 +91,6 @@ fn ProtocolBuffer(
             return &self.bytes;
         }
 
-        pub fn header(self: *Self) *[header_len]u8 {
-            return self.bytes[0..header_len];
-        }
-
         pub fn body(self: *Self) *[message_len]u8 {
             return self.bytes[header_len..];
         }
@@ -105,6 +103,179 @@ fn ProtocolBuffer(
             self.pos = 0;
         }
     };
+}
+
+pub fn Websockify(
+    comptime P: fn (comptime_int) type,
+) fn (comptime_int) type {
+    const T = struct {
+        fn WebsockifiedProtocol (comptime msize: comptime_int) type {
+            return struct {
+                const Self = @This();
+                const Websocket = WebsocketProtocol(
+                    msize + Protocol.header_in_len
+                );
+                const Protocol = P(msize);
+
+                pub const Args = Protocol.Args;
+                pub const Result = Protocol.Result;
+                pub const Error = Websocket.Error || Protocol.Error;
+                const ActiveHandshake = enum {
+                    websocket,
+                    protocol
+                };
+                pub const HandshakeData = union(ActiveHandshake) {
+                    websocket: struct {
+                        args: Args,
+                        data: Websocket.HandshakeData,
+                    },
+                    protocol: Protocol.HandshakeData,
+                };
+
+                pub const message_len = msize;
+                pub const header_in_len = Websocket.header_in_len
+                    + Protocol.header_in_len;
+                pub const header_out_len = Websocket.header_out_len
+                    + Protocol.header_out_len;
+                pub const handshake_len = @max(
+                    Websocket.handshake_len,
+                    @max(Websocket.header_in_len, Websocket.header_out_len)
+                        + Protocol.handshake_len
+                );
+
+                websocket: Websocket = .{},
+                protocol: Protocol = .{},
+
+                pub fn accept(
+                    self: *Self,
+                    data: *HandshakeData,
+                    args: Args
+                ) usize {
+                    data.* = .{
+                        .websocket = .{
+                            .args = args,
+                            .data = undefined,
+                        },
+                    };
+                    return self.websocket.accept(
+                        &data.websocket.data, .{}
+                    );
+                }
+
+                pub fn connect(
+                    self: *Self,
+                    data: *HandshakeData,
+                    out_bytes: []u8,
+                    args: Args
+                ) HandshakeEvent {
+                    data.* = .{
+                        .websocket = .{
+                            .args = args,
+                            .data = undefined,
+                        },
+                    };
+                    return self.websocket.connect(
+                        &data.websocket.data, out_bytes, .{}
+                    );
+                }
+
+                pub fn handshake(
+                    self: *Self,
+                    union_data: *HandshakeData,
+                    out_bytes: []u8,
+                    in_bytes: []u8
+                ) Error!?HandshakeEvent {
+                    switch (union_data.*) {
+                        .websocket => |*ws_data| {
+                            var data = &ws_data.data;
+                            const maybe_event = try self.websocket.handshake(
+                                data, out_bytes, in_bytes
+                            );
+                            if (maybe_event) |event| {
+                                if (event.next_len == 0) {
+                                    var args = ws_data.args;
+                                    const ws_header = Websocket.header_out_len;
+                                    union_data.* = .{ .protocol = undefined, };
+                                    if (event.out_len == 0) {
+                                        var sevent = self.protocol.connect(
+                                            &union_data.protocol,
+                                            out_bytes[ws_header..],
+                                            args
+                                        );
+                                        sevent.next_len += ws_header;
+                                        sevent.out_len += ws_header;
+                                        self.websocket.encode(
+                                            out_bytes[0..sevent.out_len]
+                                        );
+                                        return sevent;
+                                    } else {
+                                        const len = self.protocol.accept(
+                                            &union_data.protocol,
+                                            args
+                                        );
+                                        return .{
+                                            .out_len = event.out_len,
+                                            .next_len = len + ws_header,
+                                        };
+                                    }
+                                }
+                            }
+                            return maybe_event;
+                        },
+                        .protocol => |*data| {
+                            try self.websocket.decode(in_bytes);
+                            var out_sub = out_bytes[Websocket.header_out_len..];
+                            var in_sub = in_bytes[Websocket.header_in_len..];
+                            var maybe_event = try self.protocol.handshake(
+                                data, out_sub, in_sub
+                            );
+                            if (maybe_event) |*event| {
+                                if (event.out_len > 0) {
+                                    event.out_len += Websocket.header_out_len;
+                                    self.websocket.encode(
+                                        out_bytes[0..event.out_len]
+                                    );
+                                }
+                                if (event.next_len > 0) {
+                                    event.next_len += Websocket.header_out_len;
+                                } if (event.rem_len > 0) {
+                                    return Error.VariableLengthDisallowed;
+                                }
+                            } else {
+                                self.websocket.decode(in_bytes)
+                                    catch unreachable;
+                            }
+                            return maybe_event;
+                        },
+                    }
+                    unreachable;
+                }
+
+                pub fn result(self: *Self, data: *HandshakeData) Result {
+                    return self.protocol.result(&data.protocol);
+                }
+
+                pub fn encode(
+                    self: *Self,
+                    bytes: []u8
+                ) void {
+                    var sub_bytes = bytes[Websocket.header_out_len..];
+                    self.protocol.encode(sub_bytes);
+                    self.websocket.encode(bytes);
+                }
+
+                pub fn decode(
+                    self: *Self,
+                    bytes: []u8
+                ) Error!void {
+                    try self.websocket.decode(bytes);
+                    var sub_bytes = bytes[Websocket.header_in_len..];
+                    try self.protocol.decode(sub_bytes);
+                }
+            };
+        }
+    };
+    return T.WebsockifiedProtocol;
 }
 
 pub fn CodedProtocol(comptime msize: comptime_int) type {
@@ -134,7 +305,7 @@ pub fn CodedProtocol(comptime msize: comptime_int) type {
         pub fn connect(
             _: *Self,
             data: *HandshakeData,
-            out_bytes: *[handshake_len]u8,
+            out_bytes: []u8,
             code: Args
         ) HandshakeEvent {
             data.code = code;
@@ -146,8 +317,8 @@ pub fn CodedProtocol(comptime msize: comptime_int) type {
         pub fn handshake(
             _: *Self,
             data: *HandshakeData,
-            out_bytes: *[handshake_len]u8,
-            in_bytes: []const u8
+            out_bytes: []u8,
+            in_bytes: []u8
         ) Error!?HandshakeEvent {
             if (!mem.eql(u8, data.code, in_bytes)) {
                 return Error.WrongCode;
@@ -159,28 +330,11 @@ pub fn CodedProtocol(comptime msize: comptime_int) type {
             return .{ .out_len = 0, .next_len = 0 };
         }
 
-        pub fn result(_: *Self, _: *HandshakeData) Result {
-            return .{};
-        }
-
-        pub fn encode(
-            _: *Self,
-            _: *[header_out_len]u8,
-            _: *[message_len]u8
-        ) void {
-            return;
-        }
-
-        pub fn decode(
-            _: *Self,
-            _: *const [header_in_len]u8,
-            _: *[message_len]u8
-        ) Error!void {
-            return;
-        }
+        pub fn result(_: *Self, _: *HandshakeData) Result { return .{}; }
+        pub fn encode(_: *Self, _: []u8) void {}
+        pub fn decode(_: *Self, _: []u8) Error!void {}
     };
 }
-
 
 pub fn WebsocketProtocol(comptime msize: comptime_int) type {
     if (msize > 65535) {
@@ -194,20 +348,20 @@ pub fn WebsocketProtocol(comptime msize: comptime_int) type {
             "Sec-WebSocket-Accept: ";
         const buffer_len = @max(
             server_response.len + 32,
-            message_len - @sizeOf(HandshakeData)
+            msize - @sizeOf(HandshakeData) - 16
         );
 
         pub const message_len = msize;
-        pub const header_in_len = if (message_len <= 125) 6 else 8;
-        pub const header_out_len = if (message_len <= 125) 2 else 4;
+        pub const header_in_len = if (msize <= 125) 6 else 8;
+        pub const header_out_len = if (msize <= 125) 2 else 4;
         pub const handshake_len = buffer_len;
 
-        pub const Result = void;
+        pub const Result = struct {};
         pub const HandshakeData = struct {
             headers_found: u16,
             key: [24]u8,
         };
-        pub const Args = void;
+        pub const Args = struct {};
         pub const Error = error{
             InvalidHeader,
             InvalidUpgrade,
@@ -231,7 +385,7 @@ pub fn WebsocketProtocol(comptime msize: comptime_int) type {
         }
 
         pub fn connect(
-            _: *Self, _: *HandshakeData, _: *[handshake_len]u8, _: Args
+            _: *Self, _: *HandshakeData, _: []u8, _: Args
         ) HandshakeEvent {
             unreachable;
         }
@@ -246,8 +400,8 @@ pub fn WebsocketProtocol(comptime msize: comptime_int) type {
         pub fn handshake(
             _: *Self,
             data: *HandshakeData,
-            out_bytes: *[handshake_len]u8,
-            in_bytes: [] u8
+            out_bytes: []u8,
+            in_bytes: []u8
         ) Error!?HandshakeEvent {
             var start: usize = 0;
             var done = false;
@@ -345,25 +499,25 @@ pub fn WebsocketProtocol(comptime msize: comptime_int) type {
 
         pub fn encode(
             _: *Self,
-            header: *[header_out_len]u8,
-            _: *[message_len]u8
+            bytes: []u8
         ) void {
+            var header = bytes[0..header_out_len];
             header[0] = 128 | 2;
-            if (message_len < 126) {
-                header[1] = @intCast(message_len & 0xff);
+            if (bytes.len < 126 + header_out_len) {
+                header[1] = @intCast(msize & 0xff);
             } else {
                 header[1] = 126;
-                header[2] = @intCast((message_len >> 8) & 0xff);
-                header[3] = @intCast(message_len & 0xff);
+                header[2] = @intCast((msize >> 8) & 0xff);
+                header[3] = @intCast(msize & 0xff);
             }
-            return;
         }
 
         pub fn decode(
             _: *Self,
-            header: *const [header_in_len]u8,
-            in_bytes: *[message_len]u8
+            bytes: []u8
         ) Error!void {
+            var header = bytes[0..header_in_len];
+            var body = bytes[header_in_len..];
             const fin = header[0] & 128 != 0;
             if (!fin) {
                 return Error.MultiFrameMessage;
@@ -391,13 +545,13 @@ pub fn WebsocketProtocol(comptime msize: comptime_int) type {
             }
             // maybe SIMD this?
             const mask = header[(header_in_len - 4)..];
-            for (in_bytes, 0..) |_, i| {
-                in_bytes[i] = in_bytes[i] ^ mask[i % 4];
+            for (body, 0..) |_, i| {
+                body[i] = body[i] ^ mask[i % 4];
             }
             return;
         }
 
-        pub fn result(_: *Self, _: *HandshakeData) Result { return {}; }
+        pub fn result(_: *Self, _: *HandshakeData) Result { return .{}; }
     };
 }
 
@@ -501,7 +655,7 @@ pub fn AEProtocol(comptime msize: comptime_int) type {
         pub fn connect(
             self: *Self,
             data: *HandshakeData,
-            out_bytes: *[handshake_len]u8,
+            out_bytes: []u8,
             args: Args
         ) HandshakeEvent {
             crypto.random.bytes(&data.connect_nonce);
@@ -530,8 +684,8 @@ pub fn AEProtocol(comptime msize: comptime_int) type {
         pub fn handshake(
             self: *Self,
             data: *HandshakeData,
-            out_bytes: *[handshake_len]u8,
-            in_bytes: []const u8
+            out_bytes: []u8,
+            in_bytes: []u8
         ) Error!?HandshakeEvent {
             if (in_bytes.len != msgSize(data.state.awaiting)) {
                 return Error.HandshakeFailed;
@@ -620,15 +774,15 @@ pub fn AEProtocol(comptime msize: comptime_int) type {
 
         pub fn encode(
             self: *Self,
-            header_bytes: *[header_len]u8,
-            body_bytes: *[message_len]u8
+            bytes: []u8
         ) void {
-            var header: *Header = @ptrCast(header_bytes); 
+            var header: *Header = @ptrCast(bytes[0..header_len]); 
+            var body = bytes[header_len..];
             crypto.random.bytes(&header.nonce);
             encrypt(
-                body_bytes,
+                body,
                 &header.mac,
-                body_bytes,
+                body,
                 &[_]u8{},
                 header.nonce,
                 self.shared_key
@@ -638,13 +792,13 @@ pub fn AEProtocol(comptime msize: comptime_int) type {
 
         pub fn decode(
             self: *Self,
-            header_bytes: *const [header_len]u8,
-            body_bytes: *[message_len]u8
+            bytes: []u8
         ) Error!void {
-            const header: *const Header = @ptrCast(header_bytes); 
+            const header: *const Header = @ptrCast(bytes[0..header_len]); 
+            var body = bytes[header_len..];
             decrypt(
-                body_bytes,
-                body_bytes,
+                body,
+                body,
                 header.mac,
                 &[_]u8{},
                 header.nonce,
@@ -670,7 +824,6 @@ pub fn Connection(
         const header_out_len = Protocol.header_out_len;
         const message_len = Protocol.message_len;
         const InMessageBuffer = ProtocolBuffer(header_in_len, message_len);
-        const OutMessageBuffer = ProtocolBuffer(header_out_len, message_len);
         const handshake_len = Protocol.handshake_len;
         const HandshakeData = Protocol.HandshakeData;
         const Result = Protocol.Result;
@@ -770,10 +923,10 @@ pub fn Connection(
                 .closed => return SendError.Closed,
             }
 
-            var buffer = OutMessageBuffer{};
-            @memcpy(buffer.body(), message);
-            self.protocol.encode(buffer.header(), buffer.body());
-            try self.sendBytes(buffer.asSlice());
+            var buffer: [header_out_len + message_len]u8 = undefined;
+            @memcpy(buffer[header_out_len..], message);
+            self.protocol.encode(&buffer);
+            try self.sendBytes(&buffer);
         }
 
         fn readBytes(self: *Self, bytes: []u8) Error!usize {
@@ -795,14 +948,18 @@ pub fn Connection(
         pub fn recv(self: *Self) RecvError!Event {
             switch (self.buffer) {
                 .init => |*p| {
+                    log.info("recv .init", .{});
                     const in_len = self.readBytes(p.buffer.readSlice())
                         catch return .{ .fail = {}, };
                     p.buffer.increment(in_len);
                     var out_bytes: [handshake_len]u8 = undefined;
                     var in_bytes = p.buffer.asSlice();
-                    const maybe_event = try self.protocol.handshake(
+                    const maybe_event = self.protocol.handshake(
                         &p.data, &out_bytes, in_bytes
-                    );
+                    ) catch {
+                        self.close();
+                        return .{ .fail = {} };
+                    };
                     if (maybe_event) |event| {
                         if (event.out_len > 0) {
                             self.sendBytes(out_bytes[0..event.out_len]) catch {
@@ -828,15 +985,13 @@ pub fn Connection(
                     }
                 },
                 .open => |*buffer| {
+                    log.info("recv .open", .{});
                     if (buffer.full()) { buffer.clear(); }
                     const len = self.readBytes(buffer.readSlice())
                         catch return .{ .close = {} };
                     buffer.increment(len);
                     if (buffer.full()) {
-                        try self.protocol.decode(
-                            buffer.header(),
-                            buffer.body()
-                        );
+                        try self.protocol.decode(buffer.asSlice());
                         return .{
                             .message = buffer.body(),
                         };
@@ -1124,6 +1279,186 @@ pub fn Server(
                         self.handshakes[i] = null;
                     }
                 }
+            }
+        }
+    };
+}
+
+pub fn Client(
+    comptime P: fn (comptime_int) type,
+    comptime Message: type,
+) type {
+    return struct {
+        const Self = @This();
+        const Error = error{ NotConnected, AlreadyConnected };
+        const message_len = s2s.serializedSize(Message);
+        const Protocol = P(message_len);
+        const Conn = Connection(Protocol);
+
+        pub const Args = Protocol.Args;
+        pub const Result = Protocol.Result;
+        const State = enum {
+            init,
+            connecting,
+            connected
+        };
+
+        poll_list: [1]os.pollfd,
+        connection: union(State) {
+            init: void,
+            connecting: struct {
+                socket: os.socket_t,
+                args: Args,
+            },
+            connected: Conn,
+        },
+
+        pub fn new() Self {
+            return .{
+                .poll_list = undefined,
+                .connection = .{ .init = {}, },
+            };
+        }
+
+        pub fn init(self: *Self) void {
+            self.connection = .{ .init = {}, };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.close();
+        }
+
+        pub fn connect(
+            self: *Self,
+            ip: []const u8,
+            port: u16,
+            args: Args
+        ) !void {
+            if (self.connection != .init) {
+                return Error.AlreadyConnected;
+            }
+            const addr = (try std.net.Ip4Address.parse(ip, port)).sa;
+            var csocket = try os.socket(
+                AF.INET,
+                SOCK.STREAM,
+                0
+            );
+            errdefer os.closeSocket(csocket);
+
+            os.connect(
+                csocket,
+                @ptrCast(&addr),
+                @sizeOf(os.sockaddr.in)
+            ) catch |err| switch (err) {
+                error.WouldBlock => if (builtin.os.tag != .emscripten) {
+                    return err;
+                },
+                else => return err,
+            };
+
+            self.poll_list = [1]os.pollfd{
+                .{ .fd = csocket, .events = POLL.IN, .revents = 0 }
+            };
+            if (builtin.os.tag != .emscripten) {
+                self.connection = .{
+                    .connected = try Conn.connect(csocket, args),
+                };
+            } else {
+                self.connection = .{
+                    .connecting = .{
+                        .socket = csocket,
+                        .args = args,
+                    },
+                };
+            }
+        }
+
+        pub fn send(self: *Self, message: Message) !void {
+            if (self.connection == .connected) {
+                var connection = &self.connection.connected;
+                var bytes: [message_len]u8 = undefined;
+                var stream = fixedBufferStream(&bytes);
+                s2s.serialize(stream.writer(), Message, message)
+                    catch unreachable;
+                return connection.send(&bytes);
+            }
+            return Error.NotConnected;
+        }
+
+        pub fn close(self: *Self) void {
+            if (self.connection == .connected) {
+                var connection = &self.connection.connected;
+                connection.close();
+                self.connection = .{ .init };
+            }
+        }
+
+        pub fn poll(
+            self: *Self,
+            ctx: anytype,
+            comptime handleOpen: fn (@TypeOf(ctx), Result) void,
+            comptime handleMessage: fn (@TypeOf(ctx), Message) void,
+            comptime handleClose: fn (@TypeOf(ctx)) void,
+            wait_ms: i32
+        ) !void {
+            if (self.connection == .init) {
+                return Error.NotConnected;
+            } else if (builtin.os.tag == .emscripten) {
+                if (self.connection == .connecting) {
+                    const socket = self.connection.connecting.socket;
+                    const args = self.connection.connecting.args;
+                    self.poll_list[0].events = POLL.OUT;
+                    var n = try std.os.poll(&self.poll_list, wait_ms);
+                    if (n > 0) {
+                        os.getsockoptError(socket) catch {
+                            os.closeSocket(socket);
+                            self.connection = .{ .init = {} };
+                            return error.ConnectionFailed;
+                        };
+                        self.connection = .{
+                            .connected = try Conn.connect(socket, args),
+                        };
+                        self.poll_list[0].events = POLL.IN;
+                    }
+                    return;
+                }
+            }
+            const n = try os.poll(&self.poll_list, wait_ms);
+            if (n == 0) {
+                return;
+            }
+            var connection = &self.connection.connected;
+            const maybe_event = connection.recv();
+            if (maybe_event) |event| switch(event) {
+                .none => {
+                    log.info("event: none", .{});
+                },
+                .open => |result| {
+                    log.info("event: open", .{});
+                    handleOpen(ctx, result);
+                },
+                .message => |bytes| {
+                    var stream = fixedBufferStream(bytes);
+                    const message = s2s.deserialize(
+                        stream.reader(), Message
+                    ) catch |err| {
+                        log.err("deserialize failure: {}", .{err});
+                        return;
+                    };
+                    log.info("event: message", .{});
+                    handleMessage(ctx, message);
+                },
+                .close => {
+                    log.info("event: close", .{});
+                    handleClose(ctx);
+                    self.connection = .{ .init = {} };
+                },
+                .fail => {
+                    log.info("event: fail", .{});
+                    self.connection = .{ .init = {} };
+                },
+            } else |err| {
+                log.err("recv error: {}", .{err});
             }
         }
     };
