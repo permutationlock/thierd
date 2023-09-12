@@ -44,8 +44,8 @@ fn HandshakeBuffer(comptime max_size: comptime_int) type {
         const Self = @This();
 
         bytes: [max_size]u8 = undefined,
-        pos: usize = 0,
-        len: usize = 0,
+        pos: u16 = 0,
+        len: u16 = 0,
 
         pub fn readSlice(self: *Self) []u8 {
             return self.bytes[self.pos..self.len];
@@ -105,551 +105,58 @@ fn ProtocolBuffer(
     };
 }
 
-pub fn Websockify(
-    comptime P: fn (comptime_int) type,
-) fn (comptime_int) type {
-    const T = struct {
-        fn WebsockifiedProtocol (comptime msize: comptime_int) type {
-            return struct {
-                const Self = @This();
-                const Websocket = WebsocketProtocol(
-                    msize + Protocol.header_in_len
-                );
-                const Protocol = P(msize);
-
-                pub const Args = Protocol.Args;
-                pub const Result = Protocol.Result;
-                pub const Error = Websocket.Error || Protocol.Error;
-                const ActiveHandshake = enum {
-                    websocket,
-                    protocol
-                };
-                pub const HandshakeData = union(ActiveHandshake) {
-                    websocket: struct {
-                        args: Args,
-                        data: Websocket.HandshakeData,
-                    },
-                    protocol: Protocol.HandshakeData,
-                };
-
-                pub const message_len = msize;
-                pub const header_in_len = Websocket.header_in_len
-                    + Protocol.header_in_len;
-                pub const header_out_len = Websocket.header_out_len
-                    + Protocol.header_out_len;
-                pub const handshake_len = @max(
-                    Websocket.handshake_len,
-                    @max(Websocket.header_in_len, Websocket.header_out_len)
-                        + Protocol.handshake_len
-                );
-
-                websocket: Websocket = .{},
-                protocol: Protocol = .{},
-
-                pub fn accept(
-                    self: *Self,
-                    data: *HandshakeData,
-                    args: Args
-                ) usize {
-                    data.* = .{
-                        .websocket = .{
-                            .args = args,
-                            .data = undefined,
-                        },
-                    };
-                    return self.websocket.accept(
-                        &data.websocket.data, .{}
-                    );
-                }
-
-                pub fn connect(
-                    self: *Self,
-                    data: *HandshakeData,
-                    out_bytes: []u8,
-                    args: Args
-                ) HandshakeEvent {
-                    data.* = .{
-                        .websocket = .{
-                            .args = args,
-                            .data = undefined,
-                        },
-                    };
-                    return self.websocket.connect(
-                        &data.websocket.data, out_bytes, .{}
-                    );
-                }
-
-                pub fn handshake(
-                    self: *Self,
-                    union_data: *HandshakeData,
-                    out_bytes: []u8,
-                    in_bytes: []u8
-                ) Error!?HandshakeEvent {
-                    switch (union_data.*) {
-                        .websocket => |*ws_data| {
-                            var data = &ws_data.data;
-                            const maybe_event = try self.websocket.handshake(
-                                data, out_bytes, in_bytes
-                            );
-                            if (maybe_event) |event| {
-                                if (event.next_len == 0) {
-                                    var args = ws_data.args;
-                                    const ws_header = Websocket.header_out_len;
-                                    union_data.* = .{ .protocol = undefined, };
-                                    if (event.out_len == 0) {
-                                        var sevent = self.protocol.connect(
-                                            &union_data.protocol,
-                                            out_bytes[ws_header..],
-                                            args
-                                        );
-                                        sevent.next_len += ws_header;
-                                        sevent.out_len += ws_header;
-                                        self.websocket.encode(
-                                            out_bytes[0..sevent.out_len]
-                                        );
-                                        return sevent;
-                                    } else {
-                                        const len = self.protocol.accept(
-                                            &union_data.protocol,
-                                            args
-                                        );
-                                        return .{
-                                            .out_len = event.out_len,
-                                            .next_len = len + ws_header,
-                                        };
-                                    }
-                                }
-                            }
-                            return maybe_event;
-                        },
-                        .protocol => |*data| {
-                            try self.websocket.decode(in_bytes);
-                            var out_sub = out_bytes[Websocket.header_out_len..];
-                            var in_sub = in_bytes[Websocket.header_in_len..];
-                            var maybe_event = try self.protocol.handshake(
-                                data, out_sub, in_sub
-                            );
-                            if (maybe_event) |*event| {
-                                if (event.out_len > 0) {
-                                    event.out_len += Websocket.header_out_len;
-                                    self.websocket.encode(
-                                        out_bytes[0..event.out_len]
-                                    );
-                                }
-                                if (event.next_len > 0) {
-                                    event.next_len += Websocket.header_out_len;
-                                } if (event.rem_len > 0) {
-                                    return Error.VariableLengthDisallowed;
-                                }
-                            } else {
-                                self.websocket.decode(in_bytes)
-                                    catch unreachable;
-                            }
-                            return maybe_event;
-                        },
-                    }
-                    unreachable;
-                }
-
-                pub fn result(self: *Self, data: *HandshakeData) Result {
-                    return self.protocol.result(&data.protocol);
-                }
-
-                pub fn encode(
-                    self: *Self,
-                    bytes: []u8
-                ) void {
-                    var sub_bytes = bytes[Websocket.header_out_len..];
-                    self.protocol.encode(sub_bytes);
-                    self.websocket.encode(bytes);
-                }
-
-                pub fn decode(
-                    self: *Self,
-                    bytes: []u8
-                ) Error!void {
-                    try self.websocket.decode(bytes);
-                    var sub_bytes = bytes[Websocket.header_in_len..];
-                    try self.protocol.decode(sub_bytes);
-                }
-            };
-        }
-    };
-    return T.WebsockifiedProtocol;
-}
-
-pub fn CodedProtocol(comptime msize: comptime_int) type {
+pub fn Websockify(comptime Protocol: type) type {
     return struct {
         const Self = @This();
-        const code_len = 16;
 
-        pub const Args = *const [code_len]u8;
-        pub const Error = error{WrongCode};
-        pub const HandshakeData = struct {
-            code: *const [code_len]u8,
-            sent: bool
+        pub const Args = Protocol.Args;
+        pub const Result = Protocol.Result;
+        pub const Error = WebsocketProtocol.Error || Protocol.Error;
+        const ActiveHandshake = enum {
+            websocket,
+            protocol
         };
-        pub const Result = struct {};
 
-        pub const message_len = msize;
-        pub const header_in_len = 0;
-        pub const header_out_len = 0;
-        pub const handshake_len = code_len;
-
-        pub fn accept(_: *Self, data: *HandshakeData, code: Args) usize {
-            data.sent = false;
-            data.code = code;
-            return code_len;
-        }
-
-        pub fn connect(
-            _: *Self,
-            data: *HandshakeData,
-            out_bytes: []u8,
-            code: Args
-        ) HandshakeEvent {
-            data.code = code;
-            data.sent = true;
-            @memcpy(out_bytes, data.code);
-            return .{ .out_len = code_len, .next_len = code_len, };
-        }
-
-        pub fn handshake(
-            _: *Self,
-            data: *HandshakeData,
-            out_bytes: []u8,
-            in_bytes: []u8
-        ) Error!?HandshakeEvent {
-            if (!mem.eql(u8, data.code, in_bytes)) {
-                return Error.WrongCode;
-            }
-            if (!data.sent) {
-                @memcpy(out_bytes, data.code);
-                return .{ .out_len = code_len, .next_len = 0 };
-            }
-            return .{ .out_len = 0, .next_len = 0 };
-        }
-
-        pub fn result(_: *Self, _: *HandshakeData) Result { return .{}; }
-        pub fn encode(_: *Self, _: []u8) void {}
-        pub fn decode(_: *Self, _: []u8) Error!void {}
-    };
-}
-
-pub fn WebsocketProtocol(comptime msize: comptime_int) type {
-    if (msize > 65535) {
-        @compileError("message size is way too big, what are you doing?!");
-    }
-    return struct {
-        const Self = @This();
-        const server_response = "HTTP/1.1 101 Switching Protocols\r\n" ++
-            "Upgrade: websocket\r\n" ++
-            "Connection: Upgrade\r\n" ++
-            "Sec-WebSocket-Accept: ";
-        const buffer_len = @max(
-            server_response.len + 32,
-            msize - @sizeOf(HandshakeData) - 16
+        pub const HandshakeData = union(ActiveHandshake) {
+            websocket: struct {
+                args: Args,
+                data: WebsocketProtocol.HandshakeData,
+            },
+            protocol: Protocol.HandshakeData,
+        };
+        pub const min_handshake_space = @max(
+            WebsocketProtocol.min_handshake_space,
+            8 + Protocol.min_handshake_space
         );
 
-        pub const message_len = msize;
-        pub const header_in_len = if (msize <= 125) 6 else 8;
-        pub const header_out_len = if (msize <= 125) 2 else 4;
-        pub const handshake_len = buffer_len;
-
-        pub const Result = struct {};
-        pub const HandshakeData = struct {
-            headers_found: u16,
-            key: [24]u8,
-        };
-        pub const Args = struct {};
-        pub const Error = error{
-            InvalidHeader,
-            InvalidUpgrade,
-            InvalidConnection,
-            InvalidLineBreak,
-            InvalidVersion,
-            InvalidRequest,
-            InvalidKey,
-            MissingLine,
-            FrameLengthInvalid,
-            FrameLengthTooLong,
-            NotMasked,
-            ReservedBitSet,
-            OpcodeNotBinary,
-            MultiFrameMessage
-        };
-
-        pub fn accept(_: *Self, data: *HandshakeData, _: Args) usize {
-            data.headers_found = 0;
-            return handshake_len;
+        pub fn headerOutLen(msize: usize) usize {
+            return WebsocketProtocol.headerOutLen(
+                msize + Protocol.headerOutLen(msize)
+            ) + Protocol.headerOutLen(msize);
+        }
+        pub fn headerInLen(msize: usize) usize {
+            return WebsocketProtocol.headerInLen(
+                msize + Protocol.headerInLen(msize)
+            ) + Protocol.headerInLen(msize);
         }
 
-        pub fn connect(
-            _: *Self, _: *HandshakeData, _: []u8, _: Args
-        ) HandshakeEvent {
-            unreachable;
-        }
+        websocket: WebsocketProtocol = .{},
+        protocol: Protocol = .{},
 
-        fn toLower(str: []u8) []u8 {
-            for (str, 0..) |c, i| {
-                str[i] = ascii.toLower(c);
-            }
-            return str;
-        }
-
-        pub fn handshake(
-            _: *Self,
+        pub fn accept(
+            self: *Self,
             data: *HandshakeData,
-            out_bytes: []u8,
-            in_bytes: []u8
-        ) Error!?HandshakeEvent {
-            var start: usize = 0;
-            var done = false;
-            while (mem.indexOfScalar(u8, in_bytes[start..], '\r')) |end| {
-                var line = in_bytes[start..(start + end)];
-                if (line.len == 0) {
-                    done = true;
-                    break;
-                }
-                if (data.headers_found == 0) {
-                    if (!ascii.endsWithIgnoreCase(line, "http/1.1")) {
-                        return Error.InvalidRequest;
-                    }
-                    data.headers_found |= 1;
-                } else {
-                    const separator = mem.indexOfScalar(u8, line, ':')
-                        orelse return Error.InvalidHeader;
-                    const name = mem.trim(
-                        u8,
-                        toLower(line[0..separator]),
-                        &ascii.whitespace
-                    );
-                    const value = mem.trim(
-                        u8,
-                        line[(separator + 1)..],
-                        &ascii.whitespace
-                    );
-                    if (mem.eql(u8, "upgrade", name)) {
-                        if (!ascii.eqlIgnoreCase("websocket", value)) {
-                            return Error.InvalidUpgrade;
-                        }
-                        data.headers_found |= 16;
-                    } else if (mem.eql(u8, "sec-websocket-version", name)) {
-                        if (!mem.eql(u8, "13", value)) {
-                            return Error.InvalidVersion;
-                        }
-                        data.headers_found |= 2;
-                    } else if (mem.eql(u8, "connection", name)) {
-                        if (ascii.indexOfIgnoreCase(value, "upgrade") == null) {
-                            return Error.InvalidConnection;
-                        }
-                        data.headers_found |= 4;
-                    } else if (mem.eql(u8, "sec-websocket-key", name)) {
-                        if (value.len != 24) {
-                            return Error.InvalidKey;
-                        }
-                        @memcpy(&data.key, value);
-                        data.headers_found |= 8;
-                    }
-                }
-                start += end + 2;
-                if (start > in_bytes.len) {
-                    return Error.InvalidLineBreak;
-                }
-            }
-
-            if (done) {
-                if (data.headers_found != 31) {
-                    return Error.MissingLine;
-                }
-                var stream = fixedBufferStream(out_bytes);
-                var writer = stream.writer();
-                writer.writeAll(server_response) catch unreachable;
-                var key_str: [28]u8 = undefined;
-                {
-                    var hash: [20]u8 = undefined;
-                    var hasher = std.crypto.hash.Sha1.init(.{});
-                    hasher.update(&data.key);
-                    hasher.update("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-                    hasher.final(&hash);
-                    _ = std.base64.standard.Encoder.encode(&key_str, &hash);
-                }
-                writer.writeAll(&key_str) catch unreachable;
-                writer.writeAll("\r\n\r\n") catch unreachable;
-                return .{
-                    .out_len = stream.pos,
-                    .next_len = 0,
-                };
-            }
-            if (start == 0) {
-                if (in_bytes.len == handshake_len) {
-                    return .{
-                        .out_len = 0,
-                        .next_len = handshake_len,
-                    };
-                }
-                return null;
-            }
-            return .{
-                .out_len = 0,
-                .next_len = handshake_len,
-                .rem_len = out_bytes.len - start,
-            };
-        }
-
-        pub fn encode(
-            _: *Self,
-            bytes: []u8
-        ) void {
-            var header = bytes[0..header_out_len];
-            header[0] = 128 | 2;
-            if (bytes.len < 126 + header_out_len) {
-                header[1] = @intCast(msize & 0xff);
-            } else {
-                header[1] = 126;
-                header[2] = @intCast((msize >> 8) & 0xff);
-                header[3] = @intCast(msize & 0xff);
-            }
-        }
-
-        pub fn decode(
-            _: *Self,
-            bytes: []u8
-        ) Error!void {
-            var header = bytes[0..header_in_len];
-            var body = bytes[header_in_len..];
-            const fin = header[0] & 128 != 0;
-            if (!fin) {
-                return Error.MultiFrameMessage;
-            }
-            if (header[0] & 112 != 0) {
-                return Error.ReservedBitSet;
-            }
-            const opcode = header[0] & 15;
-            if (opcode != 2) {
-                return Error.OpcodeNotBinary;
-            }
-            const masked = header[1] & 128 != 0;
-            if (!masked) {
-                return Error.NotMasked;
-            }
-            var payload_len: usize = @intCast(header[1] & 127);
-            if (payload_len == 126) {
-                if (message_len < 126) {
-                    return Error.FrameLengthInvalid;
-                }
-                payload_len = @intCast(header[3]);
-                payload_len += @as(usize, @intCast(header[2])) << 8;
-            } if (payload_len == 127) {
-                return Error.FrameLengthTooLong;
-            }
-            // maybe SIMD this?
-            const mask = header[(header_in_len - 4)..];
-            for (body, 0..) |_, i| {
-                body[i] = body[i] ^ mask[i % 4];
-            }
-            return;
-        }
-
-        pub fn result(_: *Self, _: *HandshakeData) Result { return .{}; }
-    };
-}
-
-pub fn AEProtocol(comptime msize: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        const X25519 = crypto.dh.X25519;
-        const Ed25519 = crypto.sign.Ed25519;
-        const Blake2b256 = crypto.hash.blake2.Blake2b256;
-        const shared_length = 32;
-        const nonce_length = 32;
-        const signature_length = Ed25519.Signature.encoded_length;
-        const public_length = Ed25519.PublicKey.encoded_length;
-
-        pub const Args = *const Ed25519.KeyPair;
-        pub const Error = error{HandshakeFailed, MessageCorrupted};
-        pub const HandshakeData = extern struct {
-            accept_nonce: [nonce_length]u8,
-            accept_dh: [X25519.public_length]u8,
-            connect_dh: [X25519.public_length]u8,
-            connect_nonce: [nonce_length]u8,
-            foreign_eddsa: [public_length]u8,
-            local_eddsa: *const Ed25519.KeyPair,
-            state: State,
-        };
-        pub const Result = [public_length]u8;
-
-        const MessageState = enum(u8) {
-            none,
-            keys,
-            signature
-        };
-
-        const State = extern struct {
-            sending: MessageState,
-            awaiting: MessageState,
-            accepting: bool,
-        };
-
-        fn msgSize(msg_state: MessageState) usize {
-            inline for (std.meta.fields(MessageState)) |fld| {
-                if (@field(MessageState, fld.name) == msg_state) {
-                    return @sizeOf(Msg(@field(MessageState, fld.name)));
-                }
-            }
-            unreachable;
-        }
-        fn Msg(comptime msg_state: MessageState) type {
-            switch (msg_state) {
-                .none => return struct {},
-                .keys => return extern union {
-                    accepting: extern struct {
-                        nonce: [nonce_length]u8 align(1),
-                        key: [X25519.public_length]u8 align(1),
-                    },
-                    connecting: extern struct {
-                        key: [X25519.public_length]u8 align(1),
-                        nonce: [nonce_length]u8 align(1),
-                    },
+            args: Args
+        ) usize {
+            data.* = .{
+                .websocket = .{
+                    .args = args,
+                    .data = undefined,
                 },
-                .signature => return extern struct {
-                    signature: [signature_length]u8 align(1),
-                    key: [public_length]u8 align(1),
-                },
-            }
-            unreachable;
-        }
-
-        const Header = extern struct {
-            nonce: [24]u8,
-            mac: [16]u8,
-        };
-        const header_len = @sizeOf(Header);
-
-        pub const message_len = msize;
-        pub const header_in_len = header_len;
-        pub const header_out_len = header_len;
-        pub const handshake_len = @max(
-            msgSize(.keys), msgSize(.signature)
-        );
-
-        shared_key: [shared_length]u8 = undefined,
-
-        pub fn accept(self: *Self, data: *HandshakeData, args: Args) usize {
-            crypto.random.bytes(&data.accept_nonce);
-            var done = false;
-            while (!done) {
-                crypto.random.bytes(&self.shared_key);
-                data.accept_dh = X25519.recoverPublicKey(self.shared_key)
-                    catch continue;
-                done = true;
-            }
-            data.local_eddsa = args;
-            data.state = .{
-                .sending = .keys, .awaiting = .keys, .accepting = true
             };
-            return msgSize(.keys);
+            return self.websocket.accept(
+                &data.websocket.data, .{}
+            );
         }
 
         pub fn connect(
@@ -658,156 +165,652 @@ pub fn AEProtocol(comptime msize: comptime_int) type {
             out_bytes: []u8,
             args: Args
         ) HandshakeEvent {
-            crypto.random.bytes(&data.connect_nonce);
-            var done = false;
-            while (!done) {
-                crypto.random.bytes(&self.shared_key);
-                data.connect_dh = X25519.recoverPublicKey(self.shared_key)
-                    catch continue;
-                done = true;
-            }
-
-            var out_message: *Msg(.keys) = @ptrCast(out_bytes);
-            out_message.connecting.nonce = data.connect_nonce;
-            out_message.connecting.key = data.connect_dh;
-
-            data.local_eddsa = args;
-            data.state = .{
-                .sending = .signature, .awaiting = .keys, .accepting = false
+            data.* = .{
+                .websocket = .{
+                    .args = args,
+                    .data = undefined,
+                },
             };
-            return .{
-                .out_len = msgSize(.keys),
-                .next_len = msgSize(.keys),
-            };
+            return self.websocket.connect(
+                &data.websocket.data, out_bytes, .{}
+            );
         }
 
         pub fn handshake(
             self: *Self,
-            data: *HandshakeData,
+            union_data: *HandshakeData,
             out_bytes: []u8,
             in_bytes: []u8
         ) Error!?HandshakeEvent {
-            if (in_bytes.len != msgSize(data.state.awaiting)) {
-                return Error.HandshakeFailed;
-            }
-            switch (data.state.awaiting) {
-                .none => unreachable,
-                .keys => {
-                    const in_message: *const Msg(.keys) = @ptrCast(in_bytes);
-                    if (data.state.accepting) {
-                        data.connect_nonce = in_message.connecting.nonce;
-                        data.connect_dh = in_message.connecting.key;
-                    } else {
-                        data.accept_nonce = in_message.accepting.nonce;
-                        data.accept_dh = in_message.accepting.key;
-                    }
-                    data.state.awaiting = .signature;
-                },
-                .signature => {
-                    const in_message: *const Msg(.signature) = 
-                        @ptrCast(in_bytes);
-
-                    var key_msg: *Msg(.keys) = @ptrCast(&data.connect_dh);
-                    var dh_foreign = &data.accept_dh;
-                    if (data.state.accepting) {
-                        key_msg = @ptrCast(&data.accept_nonce);
-                        dh_foreign = &data.connect_dh;
-                    }
-
-                    Ed25519.Signature.fromBytes(
-                        in_message.signature
-                    ).verify(
-                        mem.asBytes(key_msg),
-                        Ed25519.PublicKey.fromBytes(in_message.key)
-                            catch return Error.HandshakeFailed
-                    ) catch return Error.HandshakeFailed;
-
-                    data.foreign_eddsa = in_message.key;
-                    self.shared_key = X25519.scalarmult(
-                        self.shared_key, dh_foreign.*
-                    ) catch return Error.HandshakeFailed;
-                    Blake2b256.hash(
-                        &self.shared_key,
-                        &self.shared_key,
-                        .{ 
-                            .key = @as(*const [64]u8, @ptrCast(&data.accept_dh))
-                        }
+            switch (union_data.*) {
+                .websocket => |*ws_data| {
+                    var data = &ws_data.data;
+                    const maybe_event = try self.websocket.handshake(
+                        data, out_bytes, in_bytes
                     );
-
-                    data.state.awaiting = .none;
-                },
-            }
-
-            const sent = data.state.sending;
-            switch (data.state.sending) {
-                .none => {},
-                .keys => {
-                    var out_message: *Msg(.keys) = @ptrCast(out_bytes);
-                    out_message.accepting.nonce = data.accept_nonce;
-                    out_message.accepting.key = data.accept_dh;
-                    data.state.sending = .signature;
-                },
-                .signature => {
-                    var out_message: *Msg(.signature) = @ptrCast(out_bytes);
-                    var msg: *Msg(.keys) = @ptrCast(&data.accept_nonce);
-                    if (data.state.accepting) {
-                        msg = @ptrCast(&data.connect_dh);
+                    if (maybe_event) |event| {
+                        if (event.next_len == 0) {
+                            var args = ws_data.args;
+                            const ws_header = WebsocketProtocol.header_out_len;
+                            union_data.* = .{ .protocol = undefined, };
+                            if (event.out_len == 0) {
+                                var sevent = self.protocol.connect(
+                                    &union_data.protocol,
+                                    out_bytes[ws_header..],
+                                    args
+                                );
+                                sevent.next_len += ws_header;
+                                sevent.out_len += ws_header;
+                                self.websocket.encode(
+                                    out_bytes[0..sevent.out_len]
+                                );
+                                return sevent;
+                            } else {
+                                const len = self.protocol.accept(
+                                    &union_data.protocol,
+                                    args
+                                );
+                                return .{
+                                    .out_len = event.out_len,
+                                    .next_len = len + ws_header,
+                                };
+                            }
+                        }
                     }
-                    out_message.signature = (
-                        data.local_eddsa.sign(mem.asBytes(msg), null)
-                        catch return Error.HandshakeFailed
-                    ).toBytes();
-                    out_message.key = data.local_eddsa.public_key.toBytes();
-                    data.state.sending = .none;
+                    return maybe_event;
+                },
+                .protocol => |*data| {
+                    try self.websocket.decode(in_bytes);
+                    const hi_len = WebsocketProtocol.headerInLen(
+                        in_bytes.len - 6
+                    );
+                    const ho_len = WebsocketProtocol.headerOutLen(
+                        Protocol.handshakeLen(out_bytes.len - 4)
+                    );
+                    var out_sub = out_bytes[ho_len..];
+                    var in_sub = in_bytes[hi_len..];
+                    var maybe_event = try self.protocol.handshake(
+                        data, out_sub, in_sub
+                    );
+                    if (maybe_event) |*event| {
+                        if (event.out_len > 0) {
+                            const real_ho_len = WebsocketProtocol.headerOutLen(
+                                event.out_len
+                            );
+                            if (ho_len != real_ho_len) {
+                                std.mem.copyForward(
+                                    u8,
+                                    out_bytes[real_ho_len..][0..event.out_len],
+                                    out_sub
+                                );
+                            }
+                            event.out_len += real_ho_len;
+                            self.websocket.encode(
+                                out_bytes[0..event.out_len]
+                            );
+                        }
+                        if (event.next_len > 0) {
+                            event.next_len += WebsocketProtocol.headerInLen(
+                                event.next_len
+                            );
+                        } if (event.rem_len > 0) { unreachable; }
+                    } else {
+                        self.websocket.decode(in_bytes) catch unreachable;
+                    }
+                    return maybe_event;
                 },
             }
-
-            return .{
-                .out_len = msgSize(sent),
-                .next_len = msgSize(data.state.awaiting),
-            };
+            unreachable;
         }
 
-        pub fn result(_: *Self, data: *HandshakeData) Result {
-            return data.foreign_eddsa;
+        pub fn result(self: *Self, data: *HandshakeData) Result {
+            return self.protocol.result(&data.protocol);
         }
 
-        pub fn encode(
-            self: *Self,
-            bytes: []u8
-        ) void {
-            var header: *Header = @ptrCast(bytes[0..header_len]); 
-            var body = bytes[header_len..];
-            crypto.random.bytes(&header.nonce);
-            encrypt(
-                body,
-                &header.mac,
-                body,
-                &[_]u8{},
-                header.nonce,
-                self.shared_key
-            );
-            return;
+        pub fn encode(self: *Self, bytes: []u8) void {
+            const header_len = WebsocketProtocol.headerOutLen(bytes.len - 2);
+            self.protocol.encode(bytes[header_len..]);
+            self.websocket.encode(bytes);
         }
 
-        pub fn decode(
-            self: *Self,
-            bytes: []u8
-        ) Error!void {
-            const header: *const Header = @ptrCast(bytes[0..header_len]); 
-            var body = bytes[header_len..];
-            decrypt(
-                body,
-                body,
-                header.mac,
-                &[_]u8{},
-                header.nonce,
-                self.shared_key
-            ) catch return Error.MessageCorrupted;
-            return;
+        pub fn decode(self: *Self, bytes: []u8) Error!void {
+            const header_len = WebsocketProtocol.headerInLen(bytes.len - 6);
+            try self.websocket.decode(bytes);
+            try self.protocol.decode(bytes[header_len..]);
         }
     };
 }
+
+pub const CodedProtocol = struct {
+    const Self = @This();
+    const code_len = 16;
+
+    pub const Args = *const [code_len]u8;
+    pub const Error = error{WrongCode};
+    pub const Result = struct {};
+    pub const HandshakeData = struct {
+        code: *const [code_len]u8,
+        sent: bool
+    };
+    pub const min_handshake_space = code_len;
+
+    pub fn headerInLen(comptime _: usize) usize { return 0; }
+    pub fn headerOutLen(comptime _: usize) usize { return 0; }
+
+    pub fn accept(_: *Self, data: *HandshakeData, code: Args) usize {
+        data.sent = false;
+        data.code = code;
+        return code_len;
+    }
+
+    pub fn connect(
+        _: *Self,
+        data: *HandshakeData,
+        out_bytes: []u8,
+        code: Args
+    ) HandshakeEvent {
+        data.code = code;
+        data.sent = true;
+        @memcpy(out_bytes, data.code);
+        return .{ .out_len = code_len, .next_len = code_len, };
+    }
+
+    pub fn handshake(
+        _: *Self,
+        data: *HandshakeData,
+        out_bytes: []u8,
+        in_bytes: []u8
+    ) Error!?HandshakeEvent {
+        if (!mem.eql(u8, data.code, in_bytes)) {
+            return Error.WrongCode;
+        }
+        if (!data.sent) {
+            @memcpy(out_bytes, data.code);
+            return .{ .out_len = code_len, .next_len = 0 };
+        }
+        return .{ .out_len = 0, .next_len = 0 };
+    }
+
+    pub fn result(_: *Self, _: *HandshakeData) Result { return .{}; }
+    pub fn encode(_: *Self, _: []u8) void {}
+    pub fn decode(_: *Self, _: []u8) Error!void {}
+};
+
+pub const WebsocketProtocol = struct {
+    const Self = @This();
+    const server_response = "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Accept: ";
+    pub const min_handshake_space = server_response.len + 32;
+
+    pub fn header_in_len(msize: usize) usize {
+        return if (msize <= 125) 6 else 8;
+    }
+    pub fn header_out_len(msize: usize) usize {
+        return if (msize <= 125) 2 else 4;
+    }
+
+    pub const Result = struct {};
+    pub const HandshakeData = struct {
+        headers_found: u16,
+        key: [24]u8,
+    };
+    pub const Args = struct {};
+    pub const Error = error{
+        InvalidHeader,
+        InvalidUpgrade,
+        InvalidConnection,
+        InvalidLineBreak,
+        InvalidVersion,
+        InvalidRequest,
+        InvalidKey,
+        MissingLine,
+        FrameLengthInvalid,
+        FrameLengthTooLong,
+        NotMasked,
+        ReservedBitSet,
+        OpcodeNotBinary,
+        MultiFrameMessage
+    };
+
+    pub fn accept(_: *Self, data: *HandshakeData, _: Args) usize {
+        data.headers_found = 0;
+        return std.math.maxInt(usize);
+    }
+
+    pub fn connect(
+        _: *Self, _: *HandshakeData, _: []u8, _: Args
+    ) HandshakeEvent {
+        unreachable;
+    }
+
+    fn toLower(str: []u8) []u8 {
+        for (str, 0..) |c, i| {
+            str[i] = ascii.toLower(c);
+        }
+        return str;
+    }
+
+    pub fn handshake(
+        _: *Self,
+        data: *HandshakeData,
+        out_bytes: []u8,
+        in_bytes: []u8
+    ) Error!?HandshakeEvent {
+        var start: usize = 0;
+        var done = false;
+        while (mem.indexOfScalar(u8, in_bytes[start..], '\r')) |end| {
+            var line = in_bytes[start..(start + end)];
+            if (line.len == 0) {
+                done = true;
+                break;
+            }
+            if (data.headers_found == 0) {
+                if (!ascii.endsWithIgnoreCase(line, "http/1.1")) {
+                    return Error.InvalidRequest;
+                }
+                data.headers_found |= 1;
+            } else {
+                const separator = mem.indexOfScalar(u8, line, ':')
+                    orelse return Error.InvalidHeader;
+                const name = mem.trim(
+                    u8,
+                    toLower(line[0..separator]),
+                    &ascii.whitespace
+                );
+                const value = mem.trim(
+                    u8,
+                    line[(separator + 1)..],
+                    &ascii.whitespace
+                );
+                if (mem.eql(u8, "upgrade", name)) {
+                    if (!ascii.eqlIgnoreCase("websocket", value)) {
+                        return Error.InvalidUpgrade;
+                    }
+                    data.headers_found |= 16;
+                } else if (mem.eql(u8, "sec-websocket-version", name)) {
+                    if (!mem.eql(u8, "13", value)) {
+                        return Error.InvalidVersion;
+                    }
+                    data.headers_found |= 2;
+                } else if (mem.eql(u8, "connection", name)) {
+                    if (ascii.indexOfIgnoreCase(value, "upgrade") == null) {
+                        return Error.InvalidConnection;
+                    }
+                    data.headers_found |= 4;
+                } else if (mem.eql(u8, "sec-websocket-key", name)) {
+                    if (value.len != 24) {
+                        return Error.InvalidKey;
+                    }
+                    @memcpy(&data.key, value);
+                    data.headers_found |= 8;
+                }
+            }
+            start += end + 2;
+            if (start > in_bytes.len) {
+                return Error.InvalidLineBreak;
+            }
+        }
+
+        if (done) {
+            if (data.headers_found != 31) {
+                return Error.MissingLine;
+            }
+            var stream = fixedBufferStream(out_bytes);
+            var writer = stream.writer();
+            writer.writeAll(server_response) catch unreachable;
+            var key_str: [28]u8 = undefined;
+            {
+                var hash: [20]u8 = undefined;
+                var hasher = std.crypto.hash.Sha1.init(.{});
+                hasher.update(&data.key);
+                hasher.update("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+                hasher.final(&hash);
+                _ = std.base64.standard.Encoder.encode(&key_str, &hash);
+            }
+            writer.writeAll(&key_str) catch unreachable;
+            writer.writeAll("\r\n\r\n") catch unreachable;
+            return .{
+                .out_len = stream.pos,
+                .next_len = 0,
+            };
+        }
+        if (start == 0) {
+            if (in_bytes.len >= min_handshake_space) {
+                return .{
+                    .out_len = 0,
+                    .next_len = std.math.maxInt(usize),
+                };
+            }
+            return null;
+        }
+        return .{
+            .out_len = 0,
+            .next_len = std.math.maxInt(usize),
+            .rem_len = out_bytes.len - start,
+        };
+    }
+
+    pub fn encode(
+        _: *Self,
+        bytes: []u8,
+        header_len: usize
+    ) void {
+        const message_len = bytes.len - header_len;
+        var header = bytes[0..header_len];
+        header[0] = 128 | 2;
+        if (header_len == 2) {
+            header[1] = @intCast(message_len & 0xff);
+        } else if (header_len == 4) {
+            header[1] = 126;
+            header[2] = @intCast((message_len >> 8) & 0xff);
+            header[3] = @intCast(message_len & 0xff);
+        } else {
+            unreachable;
+        }
+    }
+
+    pub fn decode(
+        _: *Self,
+        bytes: []u8,
+        header_len: usize
+    ) Error!void {
+        var header = bytes[0..header_len];
+        var body = bytes[header_len..];
+        const fin = header[0] & 128 != 0;
+        if (!fin) {
+            return Error.MultiFrameMessage;
+        }
+        if (header[0] & 112 != 0) {
+            return Error.ReservedBitSet;
+        }
+        const opcode = header[0] & 15;
+        if (opcode != 2) {
+            return Error.OpcodeNotBinary;
+        }
+        const masked = header[1] & 128 != 0;
+        if (!masked) {
+            return Error.NotMasked;
+        }
+        var payload_len: usize = @intCast(header[1] & 127);
+        if (payload_len == 126) {
+            if (header_len != 8) {
+                return Error.FrameLengthInvalid;
+            }
+            payload_len = @intCast(header[3]);
+            payload_len += @as(usize, @intCast(header[2])) << 8;
+        } else if (payload_len == 127) {
+            return Error.FrameLengthTooLong;
+        } else if (header_len != 4) {
+            unreachable;
+        }
+        // maybe SIMD this?
+        const mask = header[(header_in_len - 4)..];
+        for (body, 0..) |_, i| {
+            body[i] = body[i] ^ mask[i % 4];
+        }
+        return;
+    }
+
+    pub fn result(_: *Self, _: *HandshakeData) Result { return .{}; }
+};
+
+pub const AEProtocol = struct {
+    const Self = @This();
+
+    const X25519 = crypto.dh.X25519;
+    const Ed25519 = crypto.sign.Ed25519;
+    const Blake2b256 = crypto.hash.blake2.Blake2b256;
+    const shared_length = 32;
+    const nonce_length = 32;
+    const signature_length = Ed25519.Signature.encoded_length;
+    const public_length = Ed25519.PublicKey.encoded_length;
+
+    pub const Args = *const Ed25519.KeyPair;
+    pub const Error = error{HandshakeFailed, MessageCorrupted};
+    pub const HandshakeData = extern struct {
+        accept_nonce: [nonce_length]u8,
+        accept_dh: [X25519.public_length]u8,
+        connect_dh: [X25519.public_length]u8,
+        connect_nonce: [nonce_length]u8,
+        foreign_eddsa: [public_length]u8,
+        local_eddsa: *const Ed25519.KeyPair,
+        state: State,
+    };
+    pub const Result = [public_length]u8;
+
+    const MessageState = enum(u8) {
+        none,
+        keys,
+        signature
+    };
+
+    const State = extern struct {
+        sending: MessageState,
+        awaiting: MessageState,
+        accepting: bool,
+    };
+
+    fn msgSize(msg_state: MessageState) usize {
+        inline for (std.meta.fields(MessageState)) |fld| {
+            if (@field(MessageState, fld.name) == msg_state) {
+                return @sizeOf(Msg(@field(MessageState, fld.name)));
+            }
+        }
+        unreachable;
+    }
+    fn Msg(comptime msg_state: MessageState) type {
+        switch (msg_state) {
+            .none => return struct {},
+            .keys => return extern union {
+                accepting: extern struct {
+                    nonce: [nonce_length]u8 align(1),
+                    key: [X25519.public_length]u8 align(1),
+                },
+                connecting: extern struct {
+                    key: [X25519.public_length]u8 align(1),
+                    nonce: [nonce_length]u8 align(1),
+                },
+            },
+            .signature => return extern struct {
+                signature: [signature_length]u8 align(1),
+                key: [public_length]u8 align(1),
+            },
+        }
+        unreachable;
+    }
+
+    const Header = extern struct {
+        nonce: [24]u8,
+        mac: [16]u8,
+    };
+    const header_len = @sizeOf(Header);
+
+    pub fn headerInLen(_: usize) usize {
+        return header_len;
+    }
+    pub fn headerOutLen(_: usize) usize {
+        return header_len;
+    }
+
+    pub const min_handshake_space = @max(
+        msgSize(.keys), msgSize(.signature)
+    );
+
+    shared_key: [shared_length]u8 = undefined,
+
+    pub fn accept(self: *Self, data: *HandshakeData, args: Args) usize {
+        crypto.random.bytes(&data.accept_nonce);
+        var done = false;
+        while (!done) {
+            crypto.random.bytes(&self.shared_key);
+            data.accept_dh = X25519.recoverPublicKey(self.shared_key)
+                catch continue;
+            done = true;
+        }
+        data.local_eddsa = args;
+        data.state = .{
+            .sending = .keys, .awaiting = .keys, .accepting = true
+        };
+        return msgSize(.keys);
+    }
+
+    pub fn connect(
+        self: *Self,
+        data: *HandshakeData,
+        out_bytes: []u8,
+        args: Args
+    ) HandshakeEvent {
+        crypto.random.bytes(&data.connect_nonce);
+        var done = false;
+        while (!done) {
+            crypto.random.bytes(&self.shared_key);
+            data.connect_dh = X25519.recoverPublicKey(self.shared_key)
+                catch continue;
+            done = true;
+        }
+
+        var out_message: *Msg(.keys) = @ptrCast(out_bytes);
+        out_message.connecting.nonce = data.connect_nonce;
+        out_message.connecting.key = data.connect_dh;
+
+        data.local_eddsa = args;
+        data.state = .{
+            .sending = .signature, .awaiting = .keys, .accepting = false
+        };
+        return .{
+            .out_len = msgSize(.keys),
+            .next_len = msgSize(.keys),
+        };
+    }
+
+    pub fn handshake(
+        self: *Self,
+        data: *HandshakeData,
+        out_bytes: []u8,
+        in_bytes: []u8
+    ) Error!?HandshakeEvent {
+        if (in_bytes.len != msgSize(data.state.awaiting)) {
+            return Error.HandshakeFailed;
+        }
+        switch (data.state.awaiting) {
+            .none => unreachable,
+            .keys => {
+                const in_message: *const Msg(.keys) = @ptrCast(in_bytes);
+                if (data.state.accepting) {
+                    data.connect_nonce = in_message.connecting.nonce;
+                    data.connect_dh = in_message.connecting.key;
+                } else {
+                    data.accept_nonce = in_message.accepting.nonce;
+                    data.accept_dh = in_message.accepting.key;
+                }
+                data.state.awaiting = .signature;
+            },
+            .signature => {
+                const in_message: *const Msg(.signature) = 
+                    @ptrCast(in_bytes);
+
+                var key_msg: *Msg(.keys) = @ptrCast(&data.connect_dh);
+                var dh_foreign = &data.accept_dh;
+                if (data.state.accepting) {
+                    key_msg = @ptrCast(&data.accept_nonce);
+                    dh_foreign = &data.connect_dh;
+                }
+
+                Ed25519.Signature.fromBytes(
+                    in_message.signature
+                ).verify(
+                    mem.asBytes(key_msg),
+                    Ed25519.PublicKey.fromBytes(in_message.key)
+                        catch return Error.HandshakeFailed
+                ) catch return Error.HandshakeFailed;
+
+                data.foreign_eddsa = in_message.key;
+                self.shared_key = X25519.scalarmult(
+                    self.shared_key, dh_foreign.*
+                ) catch return Error.HandshakeFailed;
+                Blake2b256.hash(
+                    &self.shared_key,
+                    &self.shared_key,
+                    .{ 
+                        .key = @as(*const [64]u8, @ptrCast(&data.accept_dh))
+                    }
+                );
+
+                data.state.awaiting = .none;
+            },
+        }
+
+        const sent = data.state.sending;
+        switch (data.state.sending) {
+            .none => {},
+            .keys => {
+                var out_message: *Msg(.keys) = @ptrCast(out_bytes);
+                out_message.accepting.nonce = data.accept_nonce;
+                out_message.accepting.key = data.accept_dh;
+                data.state.sending = .signature;
+            },
+            .signature => {
+                var out_message: *Msg(.signature) = @ptrCast(out_bytes);
+                var msg: *Msg(.keys) = @ptrCast(&data.accept_nonce);
+                if (data.state.accepting) {
+                    msg = @ptrCast(&data.connect_dh);
+                }
+                out_message.signature = (
+                    data.local_eddsa.sign(mem.asBytes(msg), null)
+                    catch return Error.HandshakeFailed
+                ).toBytes();
+                out_message.key = data.local_eddsa.public_key.toBytes();
+                data.state.sending = .none;
+            },
+        }
+
+        return .{
+            .out_len = msgSize(sent),
+            .next_len = msgSize(data.state.awaiting),
+        };
+    }
+
+    pub fn result(_: *Self, data: *HandshakeData) Result {
+        return data.foreign_eddsa;
+    }
+
+    pub fn encode(
+        self: *Self,
+        bytes: []u8
+    ) void {
+        var header: *Header = @ptrCast(bytes[0..header_len]); 
+        var body = bytes[header_len..];
+        crypto.random.bytes(&header.nonce);
+        encrypt(
+            body,
+            &header.mac,
+            body,
+            &[_]u8{},
+            header.nonce,
+            self.shared_key
+        );
+        return;
+    }
+
+    pub fn decode(
+        self: *Self,
+        bytes: []u8
+    ) Error!void {
+        const header: *const Header = @ptrCast(bytes[0..header_len]); 
+        var body = bytes[header_len..];
+        decrypt(
+            body,
+            body,
+            header.mac,
+            &[_]u8{},
+            header.nonce,
+            self.shared_key
+        ) catch return Error.MessageCorrupted;
+        return;
+    }
+};
 
 pub const HandshakeEvent = struct {
     out_len: usize,
@@ -817,18 +820,19 @@ pub const HandshakeEvent = struct {
 
 pub fn Connection(
     comptime Protocol: type,
+    comptime message_len: comptime_int
 ) type {
     return struct {
         const Self = @This();
-        const header_in_len = Protocol.header_in_len;
-        const header_out_len = Protocol.header_out_len;
-        const message_len = Protocol.message_len;
+        const header_in_len = Protocol.headerInLen(message_len);
         const InMessageBuffer = ProtocolBuffer(header_in_len, message_len);
-        const handshake_len = Protocol.handshake_len;
         const HandshakeData = Protocol.HandshakeData;
+        const free_space = @sizeOf(InMessageBuffer)
+            - @sizeOf(HandshakeData)
+            - @sizeOf(HandshakeBuffer(0));
         const Result = Protocol.Result;
 
-        pub const Message = [message_len]u8;
+        pub const header_len = Protocol.header_out_len(message_len);
         pub const Error = error{Closed};
         pub const SendError = Error || error{NotReady};
         pub const RecvError = Error || error{Corrupted} || Protocol.Error;
@@ -843,7 +847,7 @@ pub fn Connection(
         pub const Event = union(EventType) {
             none: void,
             open: Result,
-            message: *Message,
+            message: *[message_len]u8,
             close: void,
             fail: void,
         };
@@ -857,7 +861,10 @@ pub fn Connection(
         fd: os.socket_t,
         buffer: union(State) {
             init: struct {
-                buffer: HandshakeBuffer(handshake_len),
+                buffer: HandshakeBuffer(@max(
+                    Protocol.min_handshake_len,
+                    free_space - (free_space % @alignOf(HandshakeBuffer(0)))
+                )),
                 data: HandshakeData,
             },
             open: InMessageBuffer,
@@ -892,7 +899,7 @@ pub fn Connection(
                 .protocol = .{},
                 .buffer = .{ .init = .{ .buffer = .{}, .data = undefined }, },
             };
-            var out_bytes: [handshake_len]u8 = undefined;
+            var out_bytes: [Protocol.min_handshake_size]u8 = undefined;
             const event: HandshakeEvent = self.protocol.connect(
                 &self.buffer.init.data, &out_bytes, args
             );
@@ -916,15 +923,16 @@ pub fn Connection(
             }
         }
 
-        pub fn send(self: *Self, message: *const Message) SendError!void {
+        pub fn send(
+            self: *Self,
+            buffer: *[header_len + message_len]u8
+        ) SendError!void {
             switch (self.buffer) {
                 .init => return SendError.NotReady,
                 .open => {},
                 .closed => return SendError.Closed,
             }
 
-            var buffer: [header_out_len + message_len]u8 = undefined;
-            @memcpy(buffer[header_out_len..], message);
             self.protocol.encode(&buffer);
             try self.sendBytes(&buffer);
         }
@@ -952,7 +960,7 @@ pub fn Connection(
                     const in_len = self.readBytes(p.buffer.readSlice())
                         catch return .{ .fail = {}, };
                     p.buffer.increment(in_len);
-                    var out_bytes: [handshake_len]u8 = undefined;
+                    var out_bytes: [Protocol.min_handshake_size]u8 = undefined;
                     var in_bytes = p.buffer.asSlice();
                     const maybe_event = self.protocol.handshake(
                         &p.data, &out_bytes, in_bytes
@@ -1012,7 +1020,7 @@ pub fn Connection(
 }
 
 pub fn Server(
-    comptime P: fn (comptime_int) type,
+    comptime Protocol: type,
     comptime Message: type,
     comptime max_conns: comptime_int,
     comptime max_active_handshakes: comptime_int
@@ -1026,8 +1034,7 @@ pub fn Server(
             HandshakeQueueFull
         };
         const message_len = s2s.serializedSize(Message);
-        const Protocol = P(message_len);
-        const Conn = Connection(Protocol);
+        const Conn = Connection(Protocol, message_len);
         const ConnectionPool = ArrayItemPool(Conn, max_conns);
         const HandshakeTimer = struct {
             handle: Handle,
@@ -1174,8 +1181,9 @@ pub fn Server(
 
         pub fn send(self: *Self, handle: Handle, message: Message) !void {
             if (self.connection_pool.get(handle)) |connection| {
-                var bytes: [message_len]u8 = undefined;
-                var stream = fixedBufferStream(&bytes);
+                const header_len = Protocol.header_len;
+                var bytes: [header_len + message_len]u8 = undefined;
+                var stream = fixedBufferStream(bytes[header_len..]);
                 s2s.serialize(stream.writer(), Message, message)
                     catch unreachable;
                 return connection.send(&bytes);
@@ -1376,8 +1384,9 @@ pub fn Client(
         pub fn send(self: *Self, message: Message) !void {
             if (self.connection == .connected) {
                 var connection = &self.connection.connected;
-                var bytes: [message_len]u8 = undefined;
-                var stream = fixedBufferStream(&bytes);
+                const header_len = Protocol.header_len;
+                var bytes: [header_len + message_len]u8 = undefined;
+                var stream = fixedBufferStream(bytes[header_len..]);
                 s2s.serialize(stream.writer(), Message, message)
                     catch unreachable;
                 return connection.send(&bytes);
