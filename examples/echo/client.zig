@@ -2,17 +2,10 @@ const std = @import("std");
 const thierd = @import("thierd");
 const log = std.log.scoped(.echo_client);
 
+const Message = @import("message.zig").Message;
+
 const Protocol = thierd.CodedProtocol;
 const Client = thierd.Client(Protocol, Message);
-const Message = struct {
-    len: u32,
-    bytes: [64]u8,
-    placholder: u8 = 0x77,
-
-    fn asSlice(msg: *const Message) []const u8 {
-        return msg.bytes[0..@min(msg.len, 64)];
-    }
-};
 
 const EchoClient = struct {
     client: Client,

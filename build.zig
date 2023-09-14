@@ -22,11 +22,12 @@ pub fn build(b: *Builder) !void {
     });
 
     const examples = [_]Example{
+        .{ .name = "echo_server", .path = "examples/echo/server.zig" },
+        .{ .name = "echo_client", .path = "examples/echo/client.zig" },
+        .{ .name = "echo_ae_server", .path = "examples/echo_ae/server.zig" },
+        .{ .name = "echo_ae_client", .path = "examples/echo_ae/client.zig" },
         .{ .name = "echo_ws_server", .path = "examples/echo_ws/server.zig" },
-//        .{ .name = "echo_server", .path = "examples/echo/server.zig" },
-//        .{ .name = "echo_client", .path = "examples/echo/client.zig" },
-//        .{ .name = "echo_ae_server", .path = "examples/echo_ae/server.zig" },
-//        .{ .name = "echo_ae_client", .path = "examples/echo_ae/client.zig" },
+        .{ .name = "echo_ws_client", .path = "examples/echo_ws/client.zig" },
     };
 
     for (examples) |example| {
@@ -46,7 +47,7 @@ pub fn build(b: *Builder) !void {
 
     for (ws_examples) |example| {
         if (b.sysroot == null) {
-            @panic("Pass '--sysroot \"[path to emsdk installation]/upstream/emscripten\"'");
+            @panic("pass '--sysroot \"[path to emsdk]/upstream/emscripten\"'");
         }
 
         const obj = b.addObject(.{
@@ -62,14 +63,21 @@ pub fn build(b: *Builder) !void {
             .windows => "emcc.bat",
             else => "emcc",
         };
-        var emcc_run_arg = try b.allocator.alloc(u8, b.sysroot.?.len + emccExe.len + 1);
+        var emcc_run_arg = try b.allocator.alloc(
+            u8,
+            b.sysroot.?.len + emccExe.len + 1
+        );
         defer b.allocator.free(emcc_run_arg);
 
-        emcc_run_arg = try std.fmt.bufPrint(emcc_run_arg, "{s}" ++ std.fs.path.sep_str ++ "{s}", .{ b.sysroot.?, emccExe });
+        emcc_run_arg = try std.fmt.bufPrint(
+            emcc_run_arg,
+            "{s}" ++ std.fs.path.sep_str ++ "{s}",
+            .{ b.sysroot.?, emccExe }
+        );
 
-        //create the output directory because emcc can't do it.
-        const mkdir_command = b.addSystemCommand(&[_][]const u8{ "mkdir", "-p", emccOutputDir });
-        //Actually link everything together
+        const mkdir_command = b.addSystemCommand(
+            &[_][]const u8{ "mkdir", "-p", emccOutputDir }
+        );
         const emcc_command = b.addSystemCommand(&[_][]const u8{emcc_run_arg});
         emcc_command.addFileArg(obj.getEmittedBin());
         emcc_command.step.dependOn(&obj.step);

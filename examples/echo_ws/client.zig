@@ -1,25 +1,21 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const thierd = @import("thierd");
-const log = std.log.scoped(.echo_client);
+const log = std.log.scoped(.echo_ws_client);
 
-const Protocol = thierd.CodedProtocol;
+const Message = @import("message.zig").Message;
+
+const KeyPair = std.crypto.sign.Ed25519.KeyPair;
+const Protocol = thierd.UniversalClientProtocol(thierd.AEProtocol);
+const Args = Protocol.Args;
+const Result = Protocol.Result;
 const Client = thierd.Client(Protocol, Message);
-const Message = struct {
-    len: u32,
-    bytes: [64]u8,
-    placholder: u8 = 0x77,
-
-    fn asSlice(msg: *const Message) []const u8 {
-        return msg.bytes[0..@min(msg.len, 64)];
-    }
-};
 
 const EchoClient = struct {
     client: Client,
     ready: bool,
 
-    fn handleOpen(self: *EchoClient, _: Client.Result) void {
+    fn handleOpen(self: *EchoClient, _: Result) void {
         log.info("opened", .{});
         self.ready = true;
     }
@@ -30,11 +26,11 @@ const EchoClient = struct {
     }
 
     fn handleMessage(_: *EchoClient, msg: Message) void {
-        log.info("sent: {s}", .{ msg.asSlice() });
+        log.info("received: {s}", .{ msg.asSlice() });
     }
 
     fn connect(
-        self: *EchoClient, ip: []const u8, port: u16, args: *const [16]u8
+        self: *EchoClient, ip: []const u8, port: u16, args: Args
     ) !void {
         return self.client.connect(ip, port, args);
     }
@@ -52,20 +48,29 @@ const EchoClient = struct {
             self, handleOpen, handleMessage, handleClose, wait_ms
         );
     }
+
+    fn close(self: *EchoClient) void {
+        self.client.close();
+    }
 };
 
-const code = [_]u8{0xf, 0x0, 0x0, 0xd, 0xb, 0xe, 0xe, 0xf} ** 2;
 var client = EchoClient{ .client = Client.new(), .ready = false };
 var last: std.time.Instant = undefined;
 var hello_msg: Message = .{
     .len = 0,
     .bytes = undefined,
 };
+var key_pair: KeyPair = undefined;
 
 fn update() callconv(.C) void {
-    log.info("polling", .{});
     client.poll(1000) catch |err| {
         log.err("poll error: {}", .{err});
+        client.close();
+        if (builtin.os.tag == .emscripten) {
+            std.os.emscripten.emscripten_force_exit(127);
+        } else {
+            std.os.exit(127);
+        }
     };
     var current = std.time.Instant.now() catch unreachable;
     const time_step: i64 = @intCast(current.since(last) / 1000000);
@@ -73,13 +78,20 @@ fn update() callconv(.C) void {
         last = current;
         client.send(hello_msg) catch |err| {
             log.err("send error: {}", .{err});
+            client.close();
+            if (builtin.os.tag == .emscripten) {
+                std.os.emscripten.emscripten_force_exit(127);
+            } else {
+                std.os.exit(127);
+            }
         };
     }
 }
 
 pub fn main() !void {
     log.info("connecting", .{});
-    try client.connect("127.0.0.1", 8081, &code);
+    key_pair = try KeyPair.create(null);
+    try client.connect("127.0.0.1", 8081, &key_pair);
 
     const str = "Hello from the client!";
     @memcpy(hello_msg.bytes[0..str.len], str);

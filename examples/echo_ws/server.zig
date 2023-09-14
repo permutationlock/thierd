@@ -2,18 +2,16 @@ const std = @import("std");
 const thierd = @import("thierd");
 const log = std.log.scoped(.echo_server);
 
-const Protocol = thierd.Websockify(thierd.CodedProtocol);
+const Message = @import("message.zig").Message;
+
+const KeyPair = std.crypto.sign.Ed25519.KeyPair;
+const Args = Protocol.Args;
+const Protocol = thierd.UniversalServerProtocol(thierd.AEProtocol);
 //const Protocol = thierd.WebsocketProtocol;
 const Result = EchoServer.Result;
-const EchoServer = thierd.Server(Protocol, Message, 256, 32);
+const EchoServer = thierd.Server(Protocol, Message, 768, 32);
 const Handle = EchoServer.Handle;
-const Message = struct {
-    bytes: [128]u8,
-
-    fn asSlice(msg: *const Message) []const u8 {
-        return &msg.bytes;
-    }
-};
+var key_pair: KeyPair = undefined;
 
 fn handleOpen(_: *EchoServer, handle: Handle, _: Result) void {
     log.info("connection {} opened", .{ handle });
@@ -31,9 +29,9 @@ fn handleMessage(server: *EchoServer, handle: Handle, msg: Message) void {
 }
 
 pub fn main() !void {
-    const code = [_]u8{0xf, 0x0, 0x0, 0xd, 0xb, 0xe, 0xe, 0xf} ** 2;
+    key_pair = try KeyPair.create(null);
     var server = EchoServer.new();
-    try server.listen(8081, 32, &code);
+    try server.listen(8081, 32, &key_pair);
     errdefer { server.halt(); server.deinit(); }
 
     while (true) {

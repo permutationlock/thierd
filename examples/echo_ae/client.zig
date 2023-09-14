@@ -2,20 +2,13 @@ const std = @import("std");
 const thierd = @import("thierd");
 const log = std.log.scoped(.echo_client);
 
+const Message = @import("message.zig").Message;
+
 const Protocol = thierd.AEProtocol;
 const Client = thierd.Server(Protocol, Message, 1, 1);
 const Handle = Client.Handle;
 const Result = Client.Result;
 const KeyPair = std.crypto.sign.Ed25519.KeyPair;
-const Message = struct {
-    len: u32,
-    bytes: [384]u8,
-    placholder: u8 = 0x77,
-
-    fn asSlice(msg: *const Message) []const u8 {
-        return msg.bytes[0..@min(msg.len, 64)];
-    }
-};
 
 const EchoClient = struct {
     client: Client,
