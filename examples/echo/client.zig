@@ -5,7 +5,7 @@ const log = std.log.scoped(.echo_client);
 const Message = @import("message.zig").Message;
 
 const Protocol = thierd.CodedProtocol;
-const Client = thierd.Client(Protocol, Message);
+const Client = thierd.Client(Protocol, Message, Message);
 
 const EchoClient = struct {
     client: Client,
@@ -28,7 +28,7 @@ const EchoClient = struct {
     fn connect(
         self: *EchoClient, ip: []const u8, port: u16, code: *const [16]u8
     ) !void {
-        return self.client.connect(ip, port, code);
+        return self.client.connect(ip, port, null, code);
     }
 
     fn send(self: *EchoClient, msg: Message) !void {

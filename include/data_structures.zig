@@ -9,4 +9,4 @@ pub const ListItemPool = item_pool.ListItemPool;
 pub const hash_map = @import("data_structures/hash_map.zig");
 pub const HashMap = hash_map.HashMap;
 pub const ListHashMap = hash_map.ListHashMap;
-pub const FlatHashMap = hash_map.FlatHashMap;
+pub const OpenHashMap = hash_map.OpenHashMap;

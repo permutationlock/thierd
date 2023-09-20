@@ -9,7 +9,7 @@ const KeyPair = std.crypto.sign.Ed25519.KeyPair;
 const Protocol = thierd.UniversalClientProtocol(thierd.AEProtocol);
 const Args = Protocol.Args;
 const Result = Protocol.Result;
-const Client = thierd.Client(Protocol, Message);
+const Client = thierd.Client(Protocol, Message, Message);
 
 const EchoClient = struct {
     client: Client,
@@ -32,7 +32,7 @@ const EchoClient = struct {
     fn connect(
         self: *EchoClient, ip: []const u8, port: u16, args: Args
     ) !void {
-        return self.client.connect(ip, port, args);
+        return self.client.connect(ip, port, null, args);
     }
 
     fn send(self: *EchoClient, msg: Message) !void {

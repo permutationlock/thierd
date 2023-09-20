@@ -1,6 +1,6 @@
 pub const Message = struct {
     len: u32,
-    bytes: [384]u8,
+    bytes: [2048]u8,
     placholder: u8 = 0x77,
 
     pub fn asSlice(msg: *const Message) []const u8 {

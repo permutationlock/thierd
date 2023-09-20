@@ -1,29 +1,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const testing = std.testing;
-const expectEqual = testing.expectEqual;
-const expectEqualSlices = testing.expectEqualSlices;
-
-const Allocator = std.mem.Allocator;
-
 const os = std.os;
-const AF = os.AF;
-const SOCK = os.SOCK;
-const IPPROTO = os.IPPROTO;
-const TCP = os.TCP;
-const SO = os.SO;
-const SOL = os.SOL;
-const POLL = os.POLL;
-const EPOLL = os.linux.EPOLL;
-
 const mem = std.mem;
 const net = std.net;
 const ascii = std.ascii;
 
 const log = std.log.scoped(.simple_game_server);
-
-const fixedBufferStream = std.io.fixedBufferStream;
 
 const crypto = std.crypto;
 const AEADAlg = crypto.aead.chacha_poly.XChaCha20Poly1305;
@@ -33,7 +16,6 @@ const decrypt = AEADAlg.decrypt;
 const time = std.time;
 
 const s2s = @import("include/s2s.zig");
-const monocypher = @import("include/monocypher.zig");
 
 const data_structures = @import("include/data_structures.zig");
 const RingArray = data_structures.RingArray;
@@ -652,7 +634,7 @@ pub const WebsocketProtocol = struct {
             if (data.headers_found != 31) {
                 return Error.MissingLine;
             }
-            var stream = fixedBufferStream(out_bytes);
+            var stream = std.io.fixedBufferStream(out_bytes);
             var writer = stream.writer();
             writer.writeAll(server_response) catch unreachable;
             var key_str: [28]u8 = undefined;
@@ -1029,15 +1011,19 @@ pub const HandshakeEvent = struct {
 
 pub fn Connection(
     comptime Protocol: type,
-    comptime message_len: comptime_int
+    comptime in_message_len: comptime_int,
+    comptime out_message_len: comptime_int
 ) type {
-    if (message_len > std.math.maxInt(usize) / 2) {
+    if (in_message_len > std.math.maxInt(usize) / 2) {
+        @compileError("connection not designed for large messages");
+    }
+    if (out_message_len > std.math.maxInt(usize) / 2) {
         @compileError("connection not designed for large messages");
     }
     return struct {
         const Self = @This();
-        const header_in_len = Protocol.headerInLen(message_len);
-        const InMessageBuffer = ProtocolBuffer(header_in_len, message_len);
+        const header_in_len = Protocol.headerInLen(in_message_len);
+        const InMessageBuffer = ProtocolBuffer(header_in_len, in_message_len);
         const HandshakeData = Protocol.HandshakeData;
         const free_space: usize = @max(
             0,
@@ -1051,7 +1037,7 @@ pub fn Connection(
         );
         const Result = Protocol.Result;
 
-        pub const header_len = Protocol.headerOutLen(message_len);
+        pub const header_out_len = Protocol.headerOutLen(out_message_len);
         pub const Error = error{Closed};
         pub const SendError = Error || error{NotReady};
         pub const RecvError = Error || error{Corrupted} || Protocol.Error;
@@ -1066,7 +1052,7 @@ pub fn Connection(
         pub const Event = union(EventType) {
             none: void,
             open: Result,
-            message: *[message_len]u8,
+            message: *[in_message_len]u8,
             close: void,
             fail: void,
         };
@@ -1144,7 +1130,7 @@ pub fn Connection(
 
         pub fn send(
             self: *Self,
-            buffer: *[header_len + message_len]u8
+            buffer: *[header_out_len + out_message_len]u8
         ) SendError!void {
             switch (self.buffer) {
                 .init => return SendError.NotReady,
@@ -1152,7 +1138,7 @@ pub fn Connection(
                 .closed => return SendError.Closed,
             }
 
-            self.protocol.encode(buffer, header_len);
+            self.protocol.encode(buffer, header_out_len);
             try self.sendBytes(buffer);
         }
 
@@ -1245,9 +1231,24 @@ pub fn Connection(
     };
 }
 
+pub const SockOpt = struct {
+    level: u32,
+    optname: u32,
+    opt: i32
+};
+
+pub const default_sockopts = &[_]SockOpt{
+    .{ .level = os.SOL.SOCKET, .optname = os.SO.RCVBUF, .opt = 4096 },
+    .{ .level = os.SOL.SOCKET, .optname = os.SO.SNDBUF, .opt = 4096 },
+    .{ .level = os.SOL.SOCKET, .optname = os.SO.KEEPALIVE, .opt = 1 },
+    .{ .level = os.SOL.SOCKET, .optname = os.SO.REUSEADDR, .opt = 1 },
+    .{ .level = os.IPPROTO.TCP, .optname = os.TCP.NODELAY, .opt = 1 },
+};
+
 pub fn Server(
     comptime Protocol: type,
-    comptime Message: type,
+    comptime InMessage: type,
+    comptime OutMessage: type,
     comptime max_conns: comptime_int,
     comptime max_active_handshakes: comptime_int
 ) type {
@@ -1259,8 +1260,9 @@ pub fn Server(
             InvalidHandle,
             HandshakeQueueFull
         };
-        const message_len = s2s.serializedSize(Message);
-        const Conn = Connection(Protocol, message_len);
+        const in_message_len = s2s.serializedSize(InMessage);
+        const out_message_len = s2s.serializedSize(OutMessage);
+        const Conn = Connection(Protocol, in_message_len, out_message_len);
         const ConnectionPool = ArrayItemPool(Conn, max_conns);
         const HandshakeTimer = struct {
             handle: Handle,
@@ -1312,18 +1314,25 @@ pub fn Server(
             }
         }
 
-        pub fn listen(self: *Self, port: u16, backlog: u32, args: Args) !void {
+        pub fn listen(
+            self: *Self,
+            port: u16,
+            backlog: u32,
+            maybe_sockopts: ?[]SockOpt,
+            args: Args
+        ) !void {
             if (self.listening != null) {
                 return Error.AlreadyListening;
             }
             var addr = (net.Ip4Address.parse("0.0.0.0", port)
                 catch unreachable).sa;
-            const ls = try os.socket(AF.INET, SOCK.STREAM, 0);
+            const ls = try os.socket(os.AF.INET, os.SOCK.STREAM, 0);
             errdefer os.close(ls);
-            {
-                const option: i32 = 1;
+
+            const sockopts = maybe_sockopts orelse default_sockopts;
+            for (sockopts) |so| {
                 try os.setsockopt(
-                    ls, SOL.SOCKET, SO.REUSEADDR, mem.asBytes(&option)
+                    ls, so.level, so.optname, mem.asBytes(&so.opt)
                 );
             }
             try os.bind(ls, @ptrCast(&addr), @sizeOf(os.sockaddr));
@@ -1340,11 +1349,11 @@ pub fn Server(
         fn registerEvent(self: *Self, fd: os.fd_t, handle: i32) void {
             var event = os.linux.epoll_event{
                 .data = .{ .fd = handle },
-                .events = EPOLL.IN,
+                .events = os.linux.EPOLL.IN,
             };
             os.epoll_ctl(
                 self.epoll_fd,
-                EPOLL.CTL_ADD,
+                os.linux.EPOLL.CTL_ADD,
                 fd,
                 &event
             ) catch unreachable;
@@ -1384,14 +1393,27 @@ pub fn Server(
             self.registerEvent(csocket, @intCast(handle));
         }
 
-        pub fn connect(self: *Self, ip: []const u8, port: u16, args: Args) !void {
+        pub fn connect(
+            self: *Self,
+            ip: []const u8,
+            port: u16,
+            maybe_sockopts: ?[]SockOpt,
+            args: Args
+        ) !void {
             const addr = (try std.net.Ip4Address.parse(ip, port)).sa;
             var csocket = try os.socket(
-                AF.INET,
-                SOCK.STREAM,
+                os.AF.INET,
+                os.SOCK.STREAM,
                 0
             );
             errdefer os.closeSocket(csocket);
+
+            const sockopts = maybe_sockopts orelse default_sockopts;
+            for (sockopts) |so| {
+                try os.setsockopt(
+                    csocket, so.level, so.optname, mem.asBytes(&so.opt)
+                );
+            }
 
             try os.connect(
                 csocket,
@@ -1405,12 +1427,12 @@ pub fn Server(
             self.registerEvent(csocket, @intCast(handle));
         }
 
-        pub fn send(self: *Self, handle: Handle, message: Message) !void {
+        pub fn send(self: *Self, handle: Handle, message: OutMessage) !void {
             if (self.connection_pool.get(handle)) |connection| {
-                const header_len = Conn.header_len;
-                var bytes: [header_len + message_len]u8 = undefined;
-                var stream = fixedBufferStream(bytes[header_len..]);
-                s2s.serialize(stream.writer(), Message, message)
+                const header_len = Conn.header_out_len;
+                var bytes: [header_len + out_message_len]u8 = undefined;
+                var stream = std.io.fixedBufferStream(bytes[header_len..]);
+                s2s.serialize(stream.writer(), OutMessage, message)
                     catch unreachable;
                 return connection.send(&bytes);
             }
@@ -1439,12 +1461,12 @@ pub fn Server(
             self: *Self,
             ctx: anytype,
             comptime handleOpen: fn (@TypeOf(ctx), Handle, Result) void,
-            comptime handleMessage: fn (@TypeOf(ctx), Handle, Message) void,
+            comptime handleMessage: fn (@TypeOf(ctx), Handle, InMessage) void,
             comptime handleClose: fn (@TypeOf(ctx), Handle) void,
             comptime max_events: comptime_int,
             wait_ms: i32,
             timeout_ms: u64
-        ) !void {
+        ) time.Instant {
             var epoll_events: [max_events]os.linux.epoll_event = undefined;
             const n = os.epoll_wait(
                 self.epoll_fd,
@@ -1473,9 +1495,9 @@ pub fn Server(
                         handleOpen(ctx, handle, result);
                     },
                     .message => |bytes| {
-                        var stream = fixedBufferStream(bytes);
+                        var stream = std.io.fixedBufferStream(bytes);
                         const message = s2s.deserialize(
-                            stream.reader(), Message
+                            stream.reader(), InMessage
                         ) catch |err| {
                             log.err(
                                 "connection {} deserialize failure: {}",
@@ -1514,19 +1536,22 @@ pub fn Server(
                     }
                 }
             }
+            return now;
         }
     };
 }
 
 pub fn Client(
     comptime Protocol: type,
-    comptime Message: type,
+    comptime InMessage: type,
+    comptime OutMessage: type
 ) type {
     return struct {
         const Self = @This();
         const Error = error{ NotConnected, AlreadyConnected };
-        const message_len = s2s.serializedSize(Message);
-        const Conn = Connection(Protocol, message_len);
+        const in_message_len = s2s.serializedSize(InMessage);
+        const out_message_len = s2s.serializedSize(OutMessage);
+        const Conn = Connection(Protocol, in_message_len, out_message_len);
 
         pub const Args = Protocol.Args;
         pub const Result = Protocol.Result;
@@ -1565,6 +1590,7 @@ pub fn Client(
             self: *Self,
             ip: []const u8,
             port: u16,
+            maybe_sockopts: ?[]SockOpt,
             args: Args
         ) !void {
             if (self.connection != .init) {
@@ -1572,47 +1598,48 @@ pub fn Client(
             }
             const addr = (try std.net.Ip4Address.parse(ip, port)).sa;
             var csocket = try os.socket(
-                AF.INET,
-                SOCK.STREAM,
+                os.AF.INET,
+                os.SOCK.STREAM | os.SOCK.NONBLOCK,
                 0
             );
             errdefer os.closeSocket(csocket);
+
+            if (builtin.os.tag != .emscripten) {
+                const sockopts = maybe_sockopts orelse default_sockopts;
+                for (sockopts) |so| {
+                    try os.setsockopt(
+                        csocket, so.level, so.optname, mem.asBytes(&so.opt)
+                    );
+                }
+            }
 
             os.connect(
                 csocket,
                 @ptrCast(&addr),
                 @sizeOf(os.sockaddr.in)
             ) catch |err| switch (err) {
-                error.WouldBlock => if (builtin.os.tag != .emscripten) {
-                    return err;
-                },
+                error.WouldBlock => {},
                 else => return err,
             };
 
             self.poll_list = [1]os.pollfd{
-                .{ .fd = csocket, .events = POLL.IN, .revents = 0 }
+                .{ .fd = csocket, .events = os.POLL.OUT, .revents = 0 }
             };
-            if (builtin.os.tag != .emscripten) {
-                self.connection = .{
-                    .connected = try Conn.connect(csocket, args),
-                };
-            } else {
-                self.connection = .{
-                    .connecting = .{
-                        .socket = csocket,
-                        .args = args,
-                    },
-                };
-            }
+            self.connection = .{
+                .connecting = .{
+                    .socket = csocket,
+                    .args = args,
+                },
+            };
         }
 
-        pub fn send(self: *Self, message: Message) !void {
+        pub fn send(self: *Self, message: OutMessage) !void {
             if (self.connection == .connected) {
                 var connection = &self.connection.connected;
-                const header_len = Conn.header_len;
-                var bytes: [header_len + message_len]u8 = undefined;
-                var stream = fixedBufferStream(bytes[header_len..]);
-                s2s.serialize(stream.writer(), Message, message)
+                const header_len = Conn.header_out_len;
+                var bytes: [header_len + out_message_len]u8 = undefined;
+                var stream = std.io.fixedBufferStream(bytes[header_len..]);
+                s2s.serialize(stream.writer(), OutMessage, message)
                     catch unreachable;
                 return connection.send(&bytes);
             }
@@ -1631,33 +1658,32 @@ pub fn Client(
             self: *Self,
             ctx: anytype,
             comptime handleOpen: fn (@TypeOf(ctx), Result) void,
-            comptime handleMessage: fn (@TypeOf(ctx), Message) void,
+            comptime handleMessage: fn (@TypeOf(ctx), InMessage) void,
             comptime handleClose: fn (@TypeOf(ctx)) void,
             wait_ms: i32
         ) !void {
             if (self.connection == .init) {
                 return Error.NotConnected;
-            } else if (builtin.os.tag == .emscripten) {
-                if (self.connection == .connecting) {
-                    const socket = self.connection.connecting.socket;
-                    const args = self.connection.connecting.args;
-                    self.poll_list[0].events = POLL.OUT;
-                    var n = try std.os.poll(&self.poll_list, wait_ms);
-                    if (n > 0) {
-                        os.getsockoptError(socket) catch {
-                            os.closeSocket(socket);
-                            self.connection = .{ .init = .{} };
-                            return error.ConnectionFailed;
-                        };
-                        self.connection = .{
-                            .connected = try Conn.connect(socket, args),
-                        };
-                        self.poll_list[0].events = POLL.IN;
-                    }
-                    return;
+            } else if (self.connection == .connecting) {
+                const socket = self.connection.connecting.socket;
+                const args = self.connection.connecting.args;
+                var n = std.os.poll(&self.poll_list, wait_ms)
+                    catch unreachable;
+                if (n > 0) {
+                    os.getsockoptError(socket) catch {
+                        os.closeSocket(socket);
+                        self.connection = .{ .init = .{} };
+                        return error.ConnectionFailed;
+                    };
+                    self.connection = .{
+                        .connected = try Conn.connect(socket, args),
+                    };
+                    self.poll_list[0].events = os.POLL.IN;
                 }
+                return;
             }
-            const n = try os.poll(&self.poll_list, wait_ms);
+            const n = os.poll(&self.poll_list, wait_ms)
+                catch unreachable;
             if (n == 0) {
                 return;
             }
@@ -1672,9 +1698,9 @@ pub fn Client(
                     handleOpen(ctx, result);
                 },
                 .message => |bytes| {
-                    var stream = fixedBufferStream(bytes);
+                    var stream = std.io.fixedBufferStream(bytes);
                     const message = s2s.deserialize(
-                        stream.reader(), Message
+                        stream.reader(), InMessage
                     ) catch |err| {
                         log.err("deserialize failure: {}", .{err});
                         return;
@@ -1693,6 +1719,8 @@ pub fn Client(
                 },
             } else |err| {
                 log.err("recv error: {}", .{err});
+                handleClose(ctx);
+                self.close();
             }
         }
     };

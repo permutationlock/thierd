@@ -5,7 +5,7 @@ const log = std.log.scoped(.echo_server);
 const Message = @import("message.zig").Message;
 
 const Protocol = thierd.AEProtocol;
-const EchoServer = thierd.Server(Protocol, Message, 768, 32);
+const EchoServer = thierd.Server(Protocol, Message, Message, 768, 32);
 const Result = EchoServer.Result;
 const Handle = EchoServer.Handle;
 const KeyPair = std.crypto.sign.Ed25519.KeyPair;
@@ -28,11 +28,11 @@ fn handleMessage(server: *EchoServer, handle: Handle, msg: Message) void {
 pub fn main() !void {
     var server = EchoServer.new();
     const key_pair = try KeyPair.create(null);
-    try server.listen(8081, 32, &key_pair);
+    try server.listen(8081, 32, null, &key_pair);
     errdefer { server.halt(); server.deinit(); }
 
     while (true) {
-        try server.poll(
+        _ = server.poll(
             &server, handleOpen, handleMessage, handleClose, 32, 1000, 1000
         );
     }
