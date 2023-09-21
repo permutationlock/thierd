@@ -13,3 +13,6 @@ or raw TCP connections. The design only requires 8 bytes of additional memory
 per connection to support WebSocket connections.
 
 In progress is an account system alongside lobbies and matchmaking.
+
+[1] https://en.wikipedia.org/wiki/EdDSA#Ed25519
+[2] https://en.wikipedia.org/wiki/ChaCha20-Poly1305
