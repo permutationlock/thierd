@@ -83,6 +83,26 @@ pub fn RingArray(comptime T: type, comptime size: comptime_int) type {
             return self.items[old_front];
         }
 
+        pub fn get(self: *Self, index: usize) ?*T {
+            if (self.len == 0) {
+                return null;
+            }
+            
+            return self.items[
+                (self.front + (index % self.len)) % size
+            ];
+        }
+
+        pub fn remove(self: *Self, index: usize) ?T {
+            if (self.len <= 1) {
+                return self.pop_back();
+            }
+            var ref = self.get(index).?;
+            const temp = ref.*;
+            ref.* = self.pop_back();
+            return temp;
+        }
+
         pub fn get_back(self: *Self) ?*T {
             if (self.len == 0) {
                 return null;

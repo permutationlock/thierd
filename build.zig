@@ -41,55 +41,55 @@ pub fn build(b: *Builder) !void {
         b.installArtifact(exe);
     }
 
-    const ws_examples = [_]Example{
-        .{ .name = "echo_ws_client", .path = "examples/echo_ws/client.zig" },
-    };
+    //const ws_examples = [_]Example{
+    //    .{ .name = "echo_ws_client", .path = "examples/echo_ws/client.zig" },
+    //};
 
-    for (ws_examples) |example| {
-        if (b.sysroot == null) {
-            @panic("pass '--sysroot \"[path to emsdk]/upstream/emscripten\"'");
-        }
+    //for (ws_examples) |example| {
+    //    if (b.sysroot == null) {
+    //        @panic("pass '--sysroot \"[path to emsdk]/upstream/emscripten\"'");
+    //    }
 
-        const obj = b.addObject(.{
-            .name = example.name,
-            .root_source_file = .{ .path = example.path },
-            .target = .{ .cpu_arch = .wasm32, .os_tag = .emscripten, },
-            .optimize = optimize,
-            .link_libc = true
-        });
-        obj.addModule("thierd", thierd);
+    //    const obj = b.addObject(.{
+    //        .name = example.name,
+    //        .root_source_file = .{ .path = example.path },
+    //        .target = .{ .cpu_arch = .wasm32, .os_tag = .emscripten, },
+    //        .optimize = optimize,
+    //        .link_libc = true
+    //    });
+    //    obj.addModule("thierd", thierd);
 
-        const emccExe = switch (builtin.os.tag) {
-            .windows => "emcc.bat",
-            else => "emcc",
-        };
-        var emcc_run_arg = try b.allocator.alloc(
-            u8,
-            b.sysroot.?.len + emccExe.len + 1
-        );
-        defer b.allocator.free(emcc_run_arg);
+    //    const emccExe = switch (builtin.os.tag) {
+    //        .windows => "emcc.bat",
+    //        else => "emcc",
+    //    };
+    //    var emcc_run_arg = try b.allocator.alloc(
+    //        u8,
+    //        b.sysroot.?.len + emccExe.len + 1
+    //    );
+    //    defer b.allocator.free(emcc_run_arg);
 
-        emcc_run_arg = try std.fmt.bufPrint(
-            emcc_run_arg,
-            "{s}" ++ std.fs.path.sep_str ++ "{s}",
-            .{ b.sysroot.?, emccExe }
-        );
+    //    emcc_run_arg = try std.fmt.bufPrint(
+    //        emcc_run_arg,
+    //        "{s}" ++ std.fs.path.sep_str ++ "{s}",
+    //        .{ b.sysroot.?, emccExe }
+    //    );
 
-        const mkdir_command = b.addSystemCommand(
-            &[_][]const u8{ "mkdir", "-p", emccOutputDir }
-        );
-        const emcc_command = b.addSystemCommand(&[_][]const u8{emcc_run_arg});
-        emcc_command.addFileArg(obj.getEmittedBin());
-        emcc_command.step.dependOn(&obj.step);
-        emcc_command.step.dependOn(&mkdir_command.step);
-        emcc_command.addArgs(&[_][]const u8{
-            "-o", emccOutputDir ++ emccOutputFile, "-Oz", "-sASYNCIFY"
-        });
-        if (optimize == .Debug or optimize == .ReleaseSafe) {
-            emcc_command.addArgs(&[_][]const u8{
-                "-sUSE_OFFSET_CONVERTER"
-            });
-        }
-        b.getInstallStep().dependOn(&emcc_command.step);
-    }
+    //    const mkdir_command = b.addSystemCommand(
+    //        &[_][]const u8{ "mkdir", "-p", emccOutputDir }
+    //    );
+    //    const emcc_command = b.addSystemCommand(&[_][]const u8{emcc_run_arg});
+    //    emcc_command.addFileArg(obj.getEmittedBin());
+    //    emcc_command.step.dependOn(&obj.step);
+    //    emcc_command.step.dependOn(&mkdir_command.step);
+    //    emcc_command.addArgs(&[_][]const u8{
+    //        "-o", emccOutputDir ++ emccOutputFile, "-Oz", "-sASYNCIFY"
+    //    });
+    //    if (optimize == .Debug or optimize == .ReleaseSafe) {
+    //        emcc_command.addArgs(&[_][]const u8{
+    //            "-sUSE_OFFSET_CONVERTER"
+    //        });
+    //    }
+    //    b.getInstallStep().dependOn(&emcc_command.step);
+    //}
 }
